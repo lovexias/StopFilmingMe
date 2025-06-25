@@ -1,19 +1,24 @@
+#run using pythong for_testing.py 2>nul to prevent unnecessary logs
+
 import cv2
 import time
 import tkinter as tk
 from tkinter import messagebox
-from video_utils import WaveDetector, blur_faces_in_frame, get_video_rotation
+from video_utils import WaveDetector, HandOverFaceDetector, blur_faces_in_frame, get_video_rotation
 
-video_path = "C:\\Users\\Layne\\Desktop\\RECORDINGS[CONFI]\\GH010052.mp4"
+video_path = "C:\\Users\\Layne\\Desktop\\RECORDINGS[CONFI]\\GH010090.mp4"
 
 cap = cv2.VideoCapture(video_path)
 fps = cap.get(cv2.CAP_PROP_FPS)
 rotation = get_video_rotation(video_path)
 cap.release()
 
+#IMPORTANT: I JUST CHANGE THE CLASS CALLED HERE FROMM HandOverFaceDetector to WaveDetector TO TEST EACH CLASS SEPARATELY
+#also wave_detector to detect_wave_timestamps
+
 wave_detector = WaveDetector(video_path, fps)
 wave_timestamps = wave_detector.detect_wave_timestamps(show_ui=True, frame_skip=3)
-print("Wave timestamps (s):", wave_timestamps)
+print("Hand timestamps (s):", wave_timestamps)
 
 # UI confirmation flags
 blur_enabled = False
@@ -23,7 +28,7 @@ def ask_blur():
     global blur_enabled
     root = tk.Tk()
     root.withdraw()
-    result = messagebox.askyesno("Wave Detected", "Do you want to apply blur?")
+    result = messagebox.askyesno("Hand Detected", "Do you want to apply blur?")
     blur_enabled = result
     root.destroy()
 
