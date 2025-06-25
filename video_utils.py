@@ -65,11 +65,6 @@ def generate_thumbnails(video_path, total_frames, rotation_angle, num_thumbs=10,
 
 
 class WaveDetector:
-    """
-    Runs MediaPipe Hands on the entire video to detect simple wave gestures.
-    A wave is detected when the average X‐coordinate of hand landmarks oscillates
-    left/right enough times within a short time window (1 second).
-    """
     def __init__(self, video_path, fps, detection_confidence=0.8):
         self.video_path = video_path
         self.fps = fps or 30.0
@@ -77,12 +72,9 @@ class WaveDetector:
             max_num_hands=1,
             min_detection_confidence=detection_confidence
         )
+        self.drawer = mp.solutions.drawing_utils
 
-    def detect_wave_timestamps(self):
-        """
-        Process the entire video frame by frame, detect hand landmarks, and
-        return a list of timestamps (in seconds) when a “wave” was detected.
-        """
+    def detect_wave_timestamps(self, show_ui=True, frame_skip=3):
         cap = cv2.VideoCapture(self.video_path)
         frame_count = 0
         detected_timestamps = []
@@ -94,7 +86,14 @@ class WaveDetector:
             if not ret:
                 break
 
-            # Convert to RGB for MediaPipe
+            # Skip frames to reduce processing
+            if frame_count % frame_skip != 0:
+                frame_count += 1
+                continue
+
+            # Resize to speed up processing
+            frame = cv2.resize(frame, (640, 360))
+
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.hands.process(frame_rgb)
             timestamp = frame_count / self.fps
@@ -102,26 +101,42 @@ class WaveDetector:
 
             if results.multi_hand_landmarks:
                 for hand_landmarks in results.multi_hand_landmarks:
+                    # Draw hand skeleton
+                    if show_ui:
+                        self.drawer.draw_landmarks(frame, hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS)
+
+                    # Wave detection logic
                     xs = [lm.x for lm in hand_landmarks.landmark]
                     media_x = sum(xs) / len(xs)
                     direction = None
                     if last_x is not None:
-                        if media_x < last_x - 0.02:
+                        # More sensitive threshold for higher FPS
+                        threshold = 0.005
+                        if media_x < last_x - threshold:
                             direction = "left"
-                        elif media_x > last_x + 0.02:
+                        elif media_x > last_x + threshold:
                             direction = "right"
                         if direction and (not movement_history or movement_history[-1][0] != direction):
                             movement_history.append((direction, timestamp))
-                    # Keep only movements in the last 1 second
                     movement_history = [(d, t) for d, t in movement_history if timestamp - t <= 1.0]
                     if len(movement_history) >= 4:
+                        print(f"Wave detected at {timestamp:.2f}s")
                         detected_timestamps.append(timestamp)
                         movement_history.clear()
                     last_x = media_x
 
+            if show_ui:
+                cv2.imshow("Wave Detection", frame)
+                if cv2.waitKey(int(1000 / self.fps)) & 0xFF == ord('q'):
+                    break
+
+
         cap.release()
         self.hands.close()
+        if show_ui:
+            cv2.destroyAllWindows()
         return detected_timestamps
+
 
 
 def blur_faces_in_frame(frame):

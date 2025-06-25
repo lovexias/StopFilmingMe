@@ -3,11 +3,11 @@
 import cv2
 import mediapipe as mp
 from video_utils import (
+    WaveDetector,
     get_video_rotation,
     generate_thumbnails,
     blur_faces_in_frame
 )
-
 
 class EditorCore:
     """
@@ -83,68 +83,37 @@ class EditorCore:
 
     def detect_and_blur_hand_segments(self, progress_callback=None):
         """
-        Runs MediaPipe Hands + Face Detection over every frame.  Whenever a hand+face appear,
-        it starts a blur‐segment until the face disappears.  Returns a list of segment‐start frame indices.
+        Uses WaveDetector to find wave gestures, then blurs faces starting from
+        each detected wave. Returns list of wave start frame indices.
         """
         if not self.video_path:
             return []
 
-        mp_hands = mp.solutions.hands
-        mp_face = mp.solutions.face_detection
+        wave_detector = WaveDetector(self.video_path, self.fps)
+        wave_timestamps = wave_detector.detect_wave_timestamps(show_ui=False, frame_skip=3)
+        wave_frame_indices = [int(ts * self.fps) for ts in wave_timestamps]
 
-        hands = mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        face_detector = mp_face.FaceDetection(
-            model_selection=0,
-            min_detection_confidence=0.5
-        )
+        blur_duration_frames = int(self.fps * 1.5)  # 1.5 seconds of blur per wave
+        segment_starts = []
 
         cap = cv2.VideoCapture(self.video_path)
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_idx = 0
 
-        in_blur_segment = False
-        segment_starts = []
+        for wave_start in wave_frame_indices:
+            segment_starts.append(wave_start)
+            for i in range(wave_start, min(wave_start + blur_duration_frames, total)):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+                blurred = blur_faces_in_frame(frame)
+                self.blurred_frames.add(i)
+                self.blurred_cache[i] = blurred
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            hand_res = hands.process(rgb)
-            face_res = face_detector.process(rgb)
+                if progress_callback:
+                    progress_callback(i + 1)
 
-            hand_present = (hand_res.multi_hand_landmarks is not None)
-            face_present = (face_res.detections is not None and len(face_res.detections) > 0)
-
-            # Start a new blur‐segment if both hand+face appear and we're not already blurring
-            if hand_present and face_present and not in_blur_segment:
-                in_blur_segment = True
-                segment_starts.append(frame_idx)
-
-            if in_blur_segment:
-                if face_present:
-                    blurred = blur_faces_in_frame(frame)
-                    self.blurred_frames.add(frame_idx)
-                    self.blurred_cache[frame_idx] = blurred
-                else:
-                    # End the segment once face disappears
-                    in_blur_segment = False
-
-# ─── Report progress ───────────────────────────────────
-            if progress_callback is not None:
-                 # pass (frame_idx + 1) so that progress bar goes 1..total
-                progress_callback(frame_idx + 1)
-
-            frame_idx += 1
-
-        hands.close()
-        face_detector.close()
         cap.release()
         return segment_starts
 
