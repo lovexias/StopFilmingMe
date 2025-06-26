@@ -4,9 +4,12 @@ import cv2
 import time
 import tkinter as tk
 from tkinter import messagebox
-from video_utils import WaveDetector, HandOverFaceDetector, blur_faces_in_frame, get_video_rotation
+from video_utils import WaveDetector, blur_faces_of_person, get_video_rotation
 
-video_path = "C:\\Users\\Layne\\Desktop\\RECORDINGS[CONFI]\\GH010090.mp4"
+
+
+
+video_path = "D:\\01 KYLE\\School\\College\\4th Year\\3rd Term\\THS-ST2\\RECORDINGS[CONFI]\\RECORDINGS[CONFI]\\GH010081.mp4"
 
 cap = cv2.VideoCapture(video_path)
 fps = cap.get(cv2.CAP_PROP_FPS)
@@ -17,12 +20,13 @@ cap.release()
 #also wave_detector to detect_wave_timestamps
 
 wave_detector = WaveDetector(video_path, fps)
-wave_timestamps = wave_detector.detect_wave_timestamps(show_ui=True, frame_skip=3)
+wave_timestamps = wave_detector.detect_wave_timestamps(show_ui=True, frame_skip=1)
 print("Hand timestamps (s):", wave_timestamps)
 
 # UI confirmation flags
 blur_enabled = False
 blur_prompted = False
+target_pose = None
 
 def ask_blur():
     global blur_enabled
@@ -53,12 +57,30 @@ while cap.isOpened():
     frame_count += 1
 
     # If wave detected and not asked yet, prompt
-    if not blur_prompted and any(abs(ts - timestamp) < 0.1 for ts in wave_timestamps):
-        ask_blur()
-        blur_prompted = True  # Prevent re-asking
+    if not blur_prompted:
+        match = next(((f, p) for f, p in wave_timestamps if abs(f - frame_count) < 3), None)
+        if match:
+            ask_blur()
+            if blur_enabled:
+                target_pose = match[1]  # store pose for reuse
+            blur_prompted = True
 
-    if blur_enabled:
-        frame = blur_faces_in_frame(frame)
+    # Blur every frame if confirmed
+    if blur_enabled and target_pose:
+        # Force match always by setting tolerance high (to disable skipping)
+        frame = blur_faces_of_person(frame, target_pose, tolerance=1.0)
+        if frame is not None and target_pose:
+            maybe_blurred = blur_faces_of_person(frame, target_pose)
+            if maybe_blurred is not None:
+                frame = maybe_blurred
+        else:
+            print(f"Skipping frame {frame_count}: frame is None or target_pose missing.")
+
+
+
+
+
+
 
     cv2.imshow("Test Video - Wave Detection + Blur", frame)
 

@@ -90,8 +90,9 @@ class EditorCore:
             return []
 
         wave_detector = WaveDetector(self.video_path, self.fps)
-        wave_timestamps = wave_detector.detect_wave_timestamps(show_ui=False, frame_skip=3)
-        wave_frame_indices = [int(ts * self.fps) for ts in wave_timestamps]
+        wave_data = wave_detector.detect_wave_timestamps(show_ui=False, frame_skip=3)
+        wave_frame_indices = [int(frame_idx) for frame_idx, _ in wave_data]
+
 
         blur_duration_frames = int(self.fps * 1.5)  # 1.5 seconds of blur per wave
         segment_starts = []

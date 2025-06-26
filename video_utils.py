@@ -6,12 +6,9 @@ import json
 import numpy as np
 import mediapipe as mp
 
+# Reads the rotation angle metadata from a video file using ffprobe.
+# Returns 0 if no rotation metadata is found.
 def get_video_rotation(path):
-    """
-    Uses ffprobe to read the 'rotate' metadata tag from the video file.
-    Returns an integer rotation angle (0, 90, 180, 270).
-    If ffprobe is not present or fails, returns 0.
-    """
     try:
         cmd = [
             "ffprobe", "-v", "error",
@@ -26,13 +23,8 @@ def get_video_rotation(path):
     except:
         return 0
 
-
+# Generates equally spaced thumbnails from the video for preview UI.
 def generate_thumbnails(video_path, total_frames, rotation_angle, num_thumbs=10, thumb_size=(80, 45)):
-    """
-    Generate up to num_thumbs equally‐spaced thumbnails from the video.
-    Returns a list of tuples: [(frame_index, numpy_rgb_thumbnail), ...].
-    Each thumbnail is resized to thumb_size (width, height) in RGB.
-    """
     thumbs = []
     if total_frames <= 0:
         return thumbs
@@ -47,7 +39,6 @@ def generate_thumbnails(video_path, total_frames, rotation_angle, num_thumbs=10,
         if not ret:
             continue
 
-        # Apply rotation if needed
         if rotation_angle == 90:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
         elif rotation_angle == 180:
@@ -55,7 +46,6 @@ def generate_thumbnails(video_path, total_frames, rotation_angle, num_thumbs=10,
         elif rotation_angle == 270:
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-        # Convert to RGB and resize
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         small = cv2.resize(frame_rgb, thumb_size)
         thumbs.append((frame_idx, small.copy()))
@@ -63,7 +53,7 @@ def generate_thumbnails(video_path, total_frames, rotation_angle, num_thumbs=10,
     cap.release()
     return thumbs
 
-
+# Detects wave gestures based only on horizontal movement of hand landmarks (no pose).
 class WaveDetector:
     def __init__(self, video_path, fps, detection_confidence=0.8):
         self.video_path = video_path
@@ -72,12 +62,13 @@ class WaveDetector:
             max_num_hands=1,
             min_detection_confidence=detection_confidence
         )
+        self.pose = mp.solutions.pose.Pose()
         self.drawer = mp.solutions.drawing_utils
 
     def detect_wave_timestamps(self, show_ui=True, frame_skip=3):
         cap = cv2.VideoCapture(self.video_path)
         frame_count = 0
-        detected_timestamps = []
+        detected = []
         last_x = None
         movement_history = []
 
@@ -86,57 +77,58 @@ class WaveDetector:
             if not ret:
                 break
 
-            # Skip frames to reduce processing
             if frame_count % frame_skip != 0:
                 frame_count += 1
                 continue
 
-            # Resize to speed up processing
             frame = cv2.resize(frame, (640, 360))
-
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.hands.process(frame_rgb)
-            timestamp = frame_count / self.fps
-            frame_count += 1
+            hand_results = self.hands.process(frame_rgb)
+            pose_results = self.pose.process(frame_rgb)
 
-            if results.multi_hand_landmarks:
-                for hand_landmarks in results.multi_hand_landmarks:
-                    # Draw hand skeleton
+            if hand_results.multi_hand_landmarks and pose_results.pose_landmarks:
+                for hand_landmarks in hand_results.multi_hand_landmarks:
                     if show_ui:
                         self.drawer.draw_landmarks(frame, hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS)
 
-                    # Wave detection logic
                     xs = [lm.x for lm in hand_landmarks.landmark]
                     media_x = sum(xs) / len(xs)
                     direction = None
                     if last_x is not None:
-                        # More sensitive threshold for higher FPS
                         threshold = 0.005
                         if media_x < last_x - threshold:
                             direction = "left"
                         elif media_x > last_x + threshold:
                             direction = "right"
                         if direction and (not movement_history or movement_history[-1][0] != direction):
-                            movement_history.append((direction, timestamp))
-                    movement_history = [(d, t) for d, t in movement_history if timestamp - t <= 1.0]
+                            movement_history.append((direction, frame_count, pose_results.pose_landmarks.landmark))
+
+                    movement_history = [(d, f, l) for d, f, l in movement_history if frame_count - f <= self.fps]
                     if len(movement_history) >= 4:
-                        print(f"Wave detected at {timestamp:.2f}s")
-                        detected_timestamps.append(timestamp)
+                        print(f"Wave detected at frame {frame_count}")
+                        detected.append((frame_count, pose_results.pose_landmarks.landmark))
                         movement_history.clear()
                     last_x = media_x
+
+                if show_ui:
+                    self.drawer.draw_landmarks(frame, pose_results.pose_landmarks, mp.solutions.pose.POSE_CONNECTIONS)
 
             if show_ui:
                 cv2.imshow("Wave Detection", frame)
                 if cv2.waitKey(int(1000 / self.fps)) & 0xFF == ord('q'):
                     break
 
+            frame_count += 1
 
         cap.release()
         self.hands.close()
+        self.pose.close()
         if show_ui:
             cv2.destroyAllWindows()
-        return detected_timestamps
 
+        return detected
+
+# Detects if a hand is near the face by checking hand and nose landmark proximity.
 class HandOverFaceDetector:
     def __init__(self, video_path, fps, detection_confidence=0.5):
         self.video_path = video_path
@@ -169,8 +161,8 @@ class HandOverFaceDetector:
             hands_result = self.hands.process(frame_rgb)
 
             if pose_result.pose_landmarks:
-                nose_landmark = pose_result.pose_landmarks.landmark[mp.solutions.pose.PoseLandmark.NOSE]
-                nose_x, nose_y = int(nose_landmark.x * frame.shape[1]), int(nose_landmark.y * frame.shape[0])
+                nose = pose_result.pose_landmarks.landmark[mp.solutions.pose.PoseLandmark.NOSE]
+                nose_x, nose_y = int(nose.x * frame.shape[1]), int(nose.y * frame.shape[0])
 
                 if hands_result.multi_hand_landmarks:
                     for hand_landmarks in hands_result.multi_hand_landmarks:
@@ -179,10 +171,10 @@ class HandOverFaceDetector:
                             hand_y = int(lm.y * frame.shape[0])
                             dist = np.hypot(nose_x - hand_x, nose_y - hand_y)
 
-                            if dist < 40:  # pixel threshold; adjust as needed
+                            if dist < 40:
                                 hand_over_face_frames.append(frame_count / self.fps)
                                 print(f"Hand over face at frame {frame_count}")
-                                break  # One close landmark is enough
+                                break
                         else:
                             continue
                         break
@@ -208,22 +200,60 @@ class HandOverFaceDetector:
 
         return hand_over_face_frames
 
-def blur_faces_in_frame(frame):
-    """
-    Uses MediaPipe FaceDetection to find faces in this BGR frame,
-    blurs each detected face region, and returns the new BGR frame.
-    """
-    mp_face = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.7)
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = mp_face.process(frame_rgb)
-    mp_face.close()
+# Blurs only the face of a person whose pose matches the target skeleton landmarks.
+# Used after detecting gesture to blur only that specific individual.
+last_face_box = None  # Global cache for the last known face box
 
-    if not results.detections:
+def blur_faces_of_person(frame, target_landmarks, tolerance=0.05):
+
+    global last_face_box
+
+    mp_face = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.7)
+    mp_pose = mp.solutions.pose.Pose()
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    pose_result = mp_pose.process(frame_rgb)
+    face_result = mp_face.process(frame_rgb)
+    h, w, _ = frame.shape
+
+    if not pose_result.pose_landmarks:
+        mp_face.close()
+        mp_pose.close()
         return frame
 
-    h, w, _ = frame.shape
+    curr_landmarks = pose_result.pose_landmarks.landmark
+    total_diff = sum(np.hypot(curr_landmarks[i].x - target_landmarks[i].x,
+                              curr_landmarks[i].y - target_landmarks[i].y)
+                     for i in range(len(curr_landmarks)))
+    avg_diff = total_diff / len(curr_landmarks)
+
+    if avg_diff > tolerance:
+        mp_face.close()
+        mp_pose.close()
+        return frame
+
+    # If no face detection now, try to initialize from earlier frame
+    if not face_result.detections and last_face_box is None:
+        for _ in range(5):
+            mp_face_retry = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.7)
+            frame_rgb_retry = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            retry_result = mp_face_retry.process(frame_rgb_retry)
+            mp_face_retry.close()
+
+            if retry_result.detections:
+                detection = retry_result.detections[0]
+                box = detection.location_data.relative_bounding_box
+                x = int(box.xmin * w)
+                y = int(box.ymin * h)
+                w_box = int(box.width * w)
+                h_box = int(box.height * h)
+                last_face_box = (x, y, w_box, h_box)
+                break
+
     mask = np.zeros_like(frame)
-    for detection in results.detections:
+
+    if face_result.detections:
+        detection = face_result.detections[0]
         box = detection.location_data.relative_bounding_box
         x = int(box.xmin * w)
         y = int(box.ymin * h)
@@ -232,7 +262,14 @@ def blur_faces_in_frame(frame):
         x, y = max(0, x), max(0, y)
         w_box = min(w_box, w - x)
         h_box = min(h_box, h - y)
-        mask[y : y + h_box, x : x + w_box] = 255
+        last_face_box = (x, y, w_box, h_box)
+        mask[y:y + h_box, x:x + w_box] = 255
+    elif last_face_box:
+        x, y, w_box, h_box = last_face_box
+        mask[y:y + h_box, x:x + w_box] = 255
 
     blurred = cv2.GaussianBlur(frame, (55, 55), 0)
+
+    mp_face.close()
+    mp_pose.close()
     return np.where(mask == 255, blurred, frame)
