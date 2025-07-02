@@ -6,8 +6,10 @@ from video_utils import (
     WaveDetector,
     get_video_rotation,
     generate_thumbnails,
-    blur_faces_in_frame
+    blur_faces_in_frame,
+    blur_faces_of_person
 )
+
 
 class EditorCore:
     """
@@ -83,40 +85,81 @@ class EditorCore:
 
     def detect_and_blur_hand_segments(self, progress_callback=None):
         """
-        Uses WaveDetector to find wave gestures, then blurs faces starting from
-        each detected wave. Returns list of wave start frame indices.
+        1) Detect waves → [(wave_frame, pose_landmarks), …].
+        2) For each, find entry (backwards scan) & exit (forwards scan).
+        3) Blur that person’s face on every frame in [entry, exit].
+        Returns list of wave_frame indices.
         """
         if not self.video_path:
             return []
 
+        # 1) gesture detection
         wave_detector = WaveDetector(self.video_path, self.fps)
-        wave_data = wave_detector.detect_wave_timestamps(show_ui=False, frame_skip=3)
-        wave_frame_indices = [int(frame_idx) for frame_idx, _ in wave_data]
-
-
-        blur_duration_frames = int(self.fps * 1.5)  # 1.5 seconds of blur per wave
-        segment_starts = []
+        wave_data = wave_detector.detect_wave_timestamps(
+            show_ui=False,
+            frame_skip=3
+        )  # List of (frame_idx, pose_landmarks)
+        if not wave_data:
+            return []
 
         cap = cv2.VideoCapture(self.video_path)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        for wave_start in wave_frame_indices:
-            segment_starts.append(wave_start)
-            for i in range(wave_start, min(wave_start + blur_duration_frames, total)):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                ret, frame = cap.read()
-                if not ret:
-                    continue
+        # 2) build (entry, exit, landmarks) windows
+        windows = []
+        with mp.solutions.pose.Pose() as pose_detector:
+            for wave_frame, target_landmarks in wave_data:
+                wf = int(wave_frame)
 
-                blurred = blur_faces_in_frame(frame)
-                self.blurred_frames.add(i)
-                self.blurred_cache[i] = blurred
+                # 2a) backwards scan → entry
+                entry = wf
+                while entry > 0:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, entry - 1)
+                    ret, prev = cap.read()
+                    if not ret:
+                        break
+                    prev_rgb = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
+                    if pose_detector.process(prev_rgb).pose_landmarks is None:
+                        break
+                    entry -= 1
 
-                if progress_callback:
-                    progress_callback(i + 1)
+                # 2b) forwards scan → exit
+                exit = wf
+                while exit < total_frames - 1:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, exit + 1)
+                    ret, nxt = cap.read()
+                    if not ret:
+                        break
+                    nxt_rgb = cv2.cvtColor(nxt, cv2.COLOR_BGR2RGB)
+                    if pose_detector.process(nxt_rgb).pose_landmarks is None:
+                        break
+                    exit += 1
+
+                windows.append((entry, exit, target_landmarks))
+
+        # 3) blur frames in each window
+        for i in range(total_frames):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            for entry, exit, landmarks in windows:
+                if entry <= i <= exit:
+                    # uses your tested for_testing logic with tolerance
+                    blurred = blur_faces_of_person(frame, landmarks, tolerance=1.0)
+                    self.blurred_frames.add(i)
+                    self.blurred_cache[i] = blurred
+                    break
+
+            if progress_callback:
+                progress_callback(i + 1)
 
         cap.release()
-        return segment_starts
+        # 4) return the raw wave frames for your UI list
+        return [int(wf) for wf, _ in wave_data]
+
+
 
     def get_frame(self, frame_idx: int):
         """

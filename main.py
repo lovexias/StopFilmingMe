@@ -1,4 +1,13 @@
+
+# NEW
+import sys
+# ─── Load Mediapipe’s runtime first, so its C++ DLLs bind correctly ──
+import mediapipe as mp
+print("Loaded MediaPipe", mp.__version__)    
+import webbrowser
+
 # main.py
+
 
 import sys
 import webbrowser
