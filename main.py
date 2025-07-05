@@ -24,8 +24,8 @@ from PyQt5.QtGui import QPixmap
 
 import cv2
 
-from combined_view import EditorPanel
-from editor_core import EditorCore
+from view import EditorPanel
+from model import EditorCore
 
 
 class MainWindow(QMainWindow):
