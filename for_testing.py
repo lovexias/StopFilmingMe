@@ -4,7 +4,7 @@ import cv2
 import time
 import tkinter as tk
 from tkinter import messagebox
-from video_utils import WaveDetector, blur_faces_of_person, get_video_rotation
+from utils import WaveDetector, blur_faces_of_person, get_video_rotation
 
 
 
