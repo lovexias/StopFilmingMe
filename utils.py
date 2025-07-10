@@ -62,7 +62,13 @@ class WaveDetector:
             max_num_hands=1,
             min_detection_confidence=detection_confidence
         )
-        self.pose = mp.solutions.pose.Pose()
+        self.pose = mp.solutions.pose.Pose(
+            static_image_mode=False,
+            model_complexity=2,
+            min_detection_confidence=0.8,
+            min_tracking_confidence=0.8
+        )
+
         self.drawer = mp.solutions.drawing_utils
 
     def detect_wave_timestamps(self, show_ui=True, frame_skip=3):
@@ -204,7 +210,7 @@ class HandOverFaceDetector:
 # Used after detecting gesture to blur only that specific individual.
 last_face_box = None  # Global cache for the last known face box
 
-def blur_faces_of_person(frame, target_landmarks, tolerance=0.3):
+def blur_faces_of_person(frame, target_landmarks, tolerance=0.7):
 
     global last_face_box
 
