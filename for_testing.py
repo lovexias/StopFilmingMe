@@ -9,7 +9,7 @@ from utils import WaveDetector, blur_faces_of_person, get_video_rotation
 
 
 
-video_path = "D:\\01 KYLE\\School\\College\\4th Year\\3rd Term\\THS-ST2\\RECORDINGS[CONFI]\\RECORDINGS[CONFI]\\GH010081.mp4"
+video_path = "D:\\01 KYLE\\School\\College\\4th Year\\3rd Term\\THS-ST2\\RECORDINGS[CONFI]\\RECORDINGS[CONFI]\\GH010070.mp4"
 
 cap = cv2.VideoCapture(video_path)
 fps = cap.get(cv2.CAP_PROP_FPS)

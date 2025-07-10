@@ -19,6 +19,8 @@ import cv2
 from view import EditorPanel
 from model import EditorCore
 from utils import blur_faces_of_person
+from utils import detect_and_blur_multiple_people
+
 
 
 class MainWindow(QMainWindow):
@@ -287,6 +289,11 @@ class MainWindow(QMainWindow):
         pos = int(self.core.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
         img = self.core.blurred_cache.get(pos, frame)
         self.editor_panel.display_frame(img, pos)
+        
+        frame = detect_and_blur_multiple_people(frame)
+
+        img = self.core.blurred_cache.get(pos, frame)
+        self.editor_panel.display_frame(img, pos)
 
 
     def _on_detect_requested(self):
@@ -443,14 +450,25 @@ class MainWindow(QMainWindow):
         # ─── Blur all frames for the person ──────────────────────────────
         cap = cv2.VideoCapture(self.core.video_path)
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        target_landmarks_list = []
+        items = self.editor_panel.gesture_list.findItems("", Qt.MatchContains)
+        for item in items:
+            frame_idx_item, target_landmarks = item.data(Qt.UserRole)
+            # Ensure target_landmarks is a list of landmarks
+            if hasattr(target_landmarks, "__getitem__"):
+                target_landmarks_list.append(target_landmarks)
+            else:
+                print("Skipped: target_landmarks is not a list:", target_landmarks)
 
+            
         for i in range(total):
             cap.set(cv2.CAP_PROP_POS_FRAMES, i)
             ret, frame = cap.read()
             if not ret:
                 continue
 
-            blurred = blur_faces_of_person(frame, target_landmarks)
+            blurred = blur_faces_of_person(frame, target_landmarks_list)
             self.core.blurred_frames.add(i)
             self.core.blurred_cache[i] = blurred
 

@@ -8,6 +8,41 @@ import mediapipe as mp
 
 # Reads the rotation angle metadata from a video file using ffprobe.
 # Returns 0 if no rotation metadata is found.
+from ultralytics import YOLO
+
+# Initialize YOLOv8 model globally (adjust path as needed)
+yolo_model = YOLO('yolov8m-pose.pt')   # Use your pose model path here
+
+# ──────────────────────────────────────────────────────────────
+# ADDITION: Initialize MediaPipe solutions globally for reuse
+mp_face_global = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.7)
+mp_pose_global = mp.solutions.pose.Pose()
+
+# ──────────────────────────────────────────────────────────────
+
+def detect_multiple_skeletons_yolov8(frame, conf_threshold=0.15):
+    """
+    Detects multiple skeletons in a frame using YOLOv8 pose model.
+    Returns a list of detected persons with their keypoints in (x, y) pixel coordinates.
+    """
+    results = yolo_model(frame)[0]
+    detections = []
+    h, w, _ = frame.shape
+
+    if hasattr(results, "keypoints") and results.keypoints is not None:
+        kpts = results.keypoints.xy
+        scores = results.keypoints.conf
+
+        for i, person_kpts in enumerate(kpts):
+            if scores[i].mean() < conf_threshold:
+                continue
+
+            person_kpts = person_kpts.cpu().numpy()
+            person_kpts = [(int(x * w), int(y * h)) for x, y in person_kpts]
+            detections.append(person_kpts)
+
+    return detections
+
 def get_video_rotation(path):
     try:
         cmd = [
@@ -23,7 +58,6 @@ def get_video_rotation(path):
     except:
         return 0
 
-# Generates equally spaced thumbnails from the video for preview UI.
 def generate_thumbnails(video_path, total_frames, rotation_angle, num_thumbs=10, thumb_size=(80, 45)):
     thumbs = []
     if total_frames <= 0:
@@ -53,7 +87,9 @@ def generate_thumbnails(video_path, total_frames, rotation_angle, num_thumbs=10,
     cap.release()
     return thumbs
 
-# Detects wave gestures based only on horizontal movement of hand landmarks (no pose).
+# ──────────────────────────────────────────────────────────────
+# WaveDetector class
+
 class WaveDetector:
     def __init__(self, video_path, fps, detection_confidence=0.8):
         self.video_path = video_path
@@ -68,7 +104,6 @@ class WaveDetector:
             min_detection_confidence=0.8,
             min_tracking_confidence=0.8
         )
-
         self.drawer = mp.solutions.drawing_utils
 
     def detect_wave_timestamps(self, show_ui=True, frame_skip=3):
@@ -91,6 +126,8 @@ class WaveDetector:
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             hand_results = self.hands.process(frame_rgb)
             pose_results = self.pose.process(frame_rgb)
+
+            skeletons = detect_multiple_skeletons_yolov8(frame)
 
             if hand_results.multi_hand_landmarks and pose_results.pose_landmarks:
                 for hand_landmarks in hand_results.multi_hand_landmarks:
@@ -134,7 +171,9 @@ class WaveDetector:
 
         return detected
 
-# Detects if a hand is near the face by checking hand and nose landmark proximity.
+# ──────────────────────────────────────────────────────────────
+# HandOverFaceDetector class
+
 class HandOverFaceDetector:
     def __init__(self, video_path, fps, detection_confidence=0.5):
         self.video_path = video_path
@@ -206,11 +245,12 @@ class HandOverFaceDetector:
 
         return hand_over_face_frames
 
-# Blurs only the face of a person whose pose matches the target skeleton landmarks.
-# Used after detecting gesture to blur only that specific individual.
+# ──────────────────────────────────────────────────────────────
+# blur_faces_of_person function
+
 last_face_box = None  # Global cache for the last known face box
 
-def blur_faces_of_person(frame, target_landmarks, tolerance=0.7):
+def blur_faces_of_person(frame, target_landmarks_list, tolerance=0.7):
 
     global last_face_box
 
@@ -228,57 +268,58 @@ def blur_faces_of_person(frame, target_landmarks, tolerance=0.7):
         return frame
 
     curr_landmarks = pose_result.pose_landmarks.landmark
-    total_diff = sum(np.hypot(curr_landmarks[i].x - target_landmarks[i].x,
-                              curr_landmarks[i].y - target_landmarks[i].y)
-                     for i in range(len(curr_landmarks)))
-    avg_diff = total_diff / len(curr_landmarks)
-
-    if avg_diff > tolerance:
-        mp_face.close()
-        mp_pose.close()
-        return frame
-
-    # If no face detection now, try to initialize from earlier frame
-    if not face_result.detections and last_face_box is None:
-        for _ in range(5):
-            mp_face_retry = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.7)
-            frame_rgb_retry = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            retry_result = mp_face_retry.process(frame_rgb_retry)
-            mp_face_retry.close()
-
-            if retry_result.detections:
-                detection = retry_result.detections[0]
-                box = detection.location_data.relative_bounding_box
-                x = int(box.xmin * w)
-                y = int(box.ymin * h)
-                w_box = int(box.width * w)
-                h_box = int(box.height * h)
-                last_face_box = (x, y, w_box, h_box)
-                break
-
     mask = np.zeros_like(frame)
 
-    if face_result.detections:
-        detection = face_result.detections[0]
-        box = detection.location_data.relative_bounding_box
-        x = int(box.xmin * w)
-        y = int(box.ymin * h)
-        w_box = int(box.width * w)
-        h_box = int(box.height * h)
-        x, y = max(0, x), max(0, y)
-        w_box = min(w_box, w - x)
-        h_box = min(h_box, h - y)
-        last_face_box = (x, y, w_box, h_box)
-        mask[y:y + h_box, x:x + w_box] = 255
-    elif last_face_box:
-        x, y, w_box, h_box = last_face_box
-        mask[y:y + h_box, x:x + w_box] = 255
+    for target_landmarks in target_landmarks_list:
+        total_diff = sum(np.hypot(curr_landmarks[i].x - target_landmarks[i].x,
+                                  curr_landmarks[i].y - target_landmarks[i].y)
+                         for i in range(len(curr_landmarks)))
+        avg_diff = total_diff / len(curr_landmarks)
+
+        if avg_diff > tolerance:
+            continue
+
+        if not face_result.detections and last_face_box is None:
+            for _ in range(5):
+                mp_face_retry = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.7)
+                frame_rgb_retry = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                retry_result = mp_face_retry.process(frame_rgb_retry)
+                mp_face_retry.close()
+
+                if retry_result.detections:
+                    detection = retry_result.detections[0]
+                    box = detection.location_data.relative_bounding_box
+                    x = int(box.xmin * w)
+                    y = int(box.ymin * h)
+                    w_box = int(box.width * w)
+                    h_box = int(box.height * h)
+                    last_face_box = (x, y, w_box, h_box)
+                    break
+
+        if face_result.detections:
+            detection = face_result.detections[0]
+            box = detection.location_data.relative_bounding_box
+            x = int(box.xmin * w)
+            y = int(box.ymin * h)
+            w_box = int(box.width * w)
+            h_box = int(box.height * h)
+            x, y = max(0, x), max(0, y)
+            w_box = min(w_box, w - x)
+            h_box = min(h_box, h - y)
+            last_face_box = (x, y, w_box, h_box)
+            mask[y:y + h_box, x:x + w_box] = 255
+        elif last_face_box:
+            x, y, w_box, h_box = last_face_box
+            mask[y:y + h_box, x:x + w_box] = 255
 
     blurred = cv2.GaussianBlur(frame, (55, 55), 0)
 
     mp_face.close()
     mp_pose.close()
     return np.where(mask == 255, blurred, frame)
+
+# ──────────────────────────────────────────────────────────────
+# match_person_id function
 
 def match_person_id(existing_people, new_landmarks, tolerance=0.7):
     """
@@ -292,7 +333,67 @@ def match_person_id(existing_people, new_landmarks, tolerance=0.7):
         avg_diff = total_diff / len(landmarks)
         if avg_diff < tolerance:
             return pid
-    # New person
     new_id = len(existing_people) + 1
     existing_people[new_id] = new_landmarks
     return new_id
+
+# ──────────────────────────────────────────────────────────────
+# detect_and_blur_multiple_people function using global solutions
+
+def detect_and_blur_multiple_people(frame, conf_threshold=0.15):
+    """
+    Detects multiple people using YOLOv8 pose and blurs their faces using MediaPipe.
+    Returns blurred frame.
+    Uses globally initialized mp_face_global for efficiency.
+    """
+    h, w, _ = frame.shape
+    results = yolo_model(frame)[0]
+
+    if hasattr(results, "keypoints") and results.keypoints is not None:
+        kpts = results.keypoints.xy
+        scores = results.keypoints.conf
+
+        for i, person_kpts in enumerate(kpts):
+            if scores[i].mean() < conf_threshold:
+                continue
+
+            person_kpts = person_kpts.cpu().numpy()
+            xs = [int(x * w) for x, y in person_kpts]
+            ys = [int(y * h) for x, y in person_kpts]
+            x1, x2 = max(0, min(xs)), min(w, max(xs))
+            y1, y2 = max(0, min(ys)), min(h, max(ys))
+
+            person_crop = frame[y1:y2, x1:x2]
+            if person_crop.size == 0:
+                continue
+
+            person_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
+            face_result = mp_face_global.process(person_rgb)
+
+            if face_result.detections:
+                for detection in face_result.detections:
+                    box = detection.location_data.relative_bounding_box
+                    fx = int(box.xmin * (x2 - x1)) + x1
+                    fy = int(box.ymin * (y2 - y1)) + y1
+                    fw = int(box.width * (x2 - x1))
+                    fh = int(box.height * (y2 - y1))
+
+                    fx, fy = max(0, fx), max(0, fy)
+                    fw, fh = min(fw, w - fx), min(fh, h - fy)
+
+                    face_roi = frame[fy:fy+fh, fx:fx+fw]
+                    blurred_face = cv2.GaussianBlur(face_roi, (55, 55), 0)
+                    frame[fy:fy+fh, fx:fx+fw] = blurred_face
+
+    return frame
+
+# ──────────────────────────────────────────────────────────────
+# close_global_mediapipe function
+
+def close_global_mediapipe():
+    """
+    Closes globally initialized MediaPipe solutions to release resources.
+    Call this once when application exits.
+    """
+    mp_face_global.close()
+    mp_pose_global.close()
