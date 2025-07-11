@@ -11,15 +11,26 @@ from PyQt5.QtWidgets import (
     QProgressDialog,
     QListWidgetItem
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QPixmap
 
 import cv2
+import time
 
 from view import EditorPanel
 from model import EditorCore
 from utils import blur_faces_of_person
 
+class GestureDetectWorker(QThread):
+    finished = pyqtSignal(object)  # Will emit segment_starts
+
+    def __init__(self, core):
+        super().__init__()
+        self.core = core
+
+    def run(self):
+        segment_starts = self.core.detect_and_blur_hand_segments()
+        self.finished.emit(segment_starts)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -202,10 +213,16 @@ class MainWindow(QMainWindow):
         # 7) Update the window title:
         self.setWindowTitle(f"StopFilming – Editing: {vid_path}")
 
+        # 8) Ensure the window does not resize beyond screen dimensions
+        screen = QApplication.primaryScreen()  # Get the primary screen
+        rect = screen.availableGeometry()  # Get screen's available geometry
 
+        self.showNormal()  # Ensure window is not maximized
+        self.resize(rect.width(), rect.height())  # Resize the window to fit the screen
+        self.setFixedSize(self.size())  # Make the window size fixed (not resizable)
 
-
-
+        self.repaint()  # Repaint to apply the resize
+        QApplication.processEvents()  # Force UI update
 
     def _on_save_project(self):
         """
@@ -291,36 +308,35 @@ class MainWindow(QMainWindow):
 
     def _on_detect_requested(self):
         """
-        User clicked “Detect Gestures”. Show a dark‐themed, determinate QProgressDialog
-        that moves as frames are processed, run core.detect_and_blur_hand_segments(), then
-        populate gesture_list/timestamps with person ID and gesture type.
+        User clicked “Detect Gestures”. Show a dark‐themed, indeterminate QProgressDialog
+        with a moving color chunk, run core.detect_and_blur_hand_segments() in a thread,
+        then populate gesture_list/timestamps with person ID and gesture type.
         """
         total = self.core.total_frames
         if total <= 0:
             # No video loaded or empty video
             return
 
-        # ─── Create a determinate, dark‐themed QProgressDialog ──────────────────
-        progress = QProgressDialog("Detecting gestures… Please wait…", None, 0, total, self.editor_panel)
-        progress.setWindowTitle("Processing")
-        progress.setWindowModality(Qt.ApplicationModal)
-        progress.setCancelButton(None)             # remove “Cancel” button
-        progress.setMinimumDuration(0)              # show immediately
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setValue(0)
-        progress.setMinimumSize(300, 100)           # force a reasonable popup size
-        progress.setWindowFlags(
-            progress.windowFlags()
-            & ~Qt.WindowContextHelpButtonHint       # remove “?” from title bar
+        # ─── Create an indeterminate, dark‐themed QProgressDialog ──────────────
+        self.progress = QProgressDialog("Detecting gestures… Please wait…", None, 0, 0, self.editor_panel)
+        self.progress.setWindowTitle("Processing")
+        self.progress.setWindowModality(Qt.ApplicationModal)
+        self.progress.setCancelButton(None)
+        self.progress.setMinimumDuration(0)
+        self.progress.setAutoClose(False)
+        self.progress.setAutoReset(False)
+        self.progress.setMinimumSize(300, 100)
+        self.progress.setWindowFlags(
+            self.progress.windowFlags()
+            & ~Qt.WindowContextHelpButtonHint
         )
-
-        # ─── Apply dark styling via stylesheet ────────────────────────────────
-        progress.setStyleSheet("""
+        self.progress.setStyleSheet("""
             QProgressDialog {
                 background-color: #2b2b2b;
                 color: #e0e0e0;
                 border-radius: 8px;
+                padding: 0px;
+                margin: 0px;
             }
             QProgressBar {
                 border: 1px solid #555555;
@@ -328,31 +344,44 @@ class MainWindow(QMainWindow):
                 text-align: center;
                 background-color: #3c3c3c;
                 color: #ffffff;
+                height: 25px;
+                min-width: 0;
+                width: 100%;
+                margin-left: 0px;
+                margin-right: 0px;
+                padding-left: 0px;
+                padding-right: 0px;
             }
             QProgressBar::chunk {
-                background-color: #6cace4;    /* a pop‐py blue chunk */
-                width: 20px;
+                background-color: #6cace4;
+                animation: busybar 1s linear infinite;
             }
             QLabel {
                 color: #e0e0e0;
             }
+            @keyframes busybar {
+                0% { margin-left: 0px; }
+                100% { margin-left: 100%; }
+            }
         """)
 
-        # ─── Show it and force Qt to process events so it appears immediately ──
-        progress.show()
+        self.progress.show()
         QApplication.processEvents()
 
-        # ─── Run detection, passing in progress.setValue as callback ───────────
-        segment_starts = self.core.detect_and_blur_hand_segments(
-            progress_callback=progress.setValue
-        )
+        for child in self.progress.findChildren(QProgressDialog):
+            child.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            child.setMinimumWidth(500)
 
-        # ─── Close the dialog when done ───────────────────────────────────────
-        progress.close()
+        # ─── Run detection in a background thread ─────────────
+        self.detect_thread = GestureDetectWorker(self.core)
+        self.detect_thread.finished.connect(self._on_gesture_detection_finished)
+        self.detect_thread.start()
 
-        # ─── Populate the gesture lists with person_id and gesture_type ────────
+    def _on_gesture_detection_finished(self, segment_starts):
+        self.progress.close()
+
+        # ─── Populate the gesture lists with person_id and gesture_type ─────
         self.editor_panel.gesture_list.clear()
-        self.editor_panel.log_list.clear()
         for person_id, gesture_type, frame_idx, landmarks in segment_starts:
             t = frame_idx / self.core.fps
             mm = int(t // 60)
@@ -360,7 +389,6 @@ class MainWindow(QMainWindow):
             msec = int((t - int(t)) * 1000)
             time_str = f"{mm:02}:{ss:02}.{msec:03}"
 
-            # Choose emoji based on gesture type
             if gesture_type == "wave":
                 emoji = "👋"
             elif gesture_type == "cover_face":
@@ -370,12 +398,9 @@ class MainWindow(QMainWindow):
 
             item_str = f"{emoji} Person {person_id} {gesture_type.capitalize()} - ({time_str})"
             item = QListWidgetItem(item_str)
-            # Store a tuple of (frame_idx, landmarks)
             item.setData(Qt.UserRole, (frame_idx, landmarks))
             self.editor_panel.gesture_list.addItem(item)
-            self.editor_panel.log_list.addItem(time_str)
 
-        # If current frame was blurred, redisplay it
         cur = self.editor_panel.current_frame_idx
         if cur in self.core.blurred_cache:
             img = self.core.blurred_cache[cur]
@@ -540,8 +565,11 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
-    # Make the window open at 1600×1000 by default:
-    window.resize(1920, 1200)
-    window.setFixedSize(window.size())
-    window.show()
+
+    # resize window to fit the device's screen size
+    screen = app.primaryScreen()
+    rect = screen.availableGeometry()
+    window.resize(rect.width(), rect.height())
+    window.showMaximized()
+
     sys.exit(app.exec_())

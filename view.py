@@ -257,18 +257,18 @@ class EditorPanel(QWidget):
         )
         markers_layout.addWidget(self.gesture_list)
 
-        log_title = QLabel("Timestamps")
-        log_title.setStyleSheet("font-weight: bold; color: #A1BFCF; font-size: 14px;")
-        markers_layout.addWidget(log_title)
+        # log_title = QLabel("Timestamps")
+        # log_title.setStyleSheet("font-weight: bold; color: #A1BFCF; font-size: 14px;")
+        # markers_layout.addWidget(log_title)
 
-        self.log_list = QListWidget()
-        self.log_list.setFixedHeight(180)
-        markers_layout.addWidget(self.log_list)
+        # self.log_list = QListWidget()
+        # self.log_list.setFixedHeight(180)
+        # markers_layout.addWidget(self.log_list)
 
-        clear_btn = QPushButton("Clear Markers")
-        clear_btn.clicked.connect(self._clear_markers)
-        clear_btn.setFixedHeight(40)
-        markers_layout.addWidget(clear_btn)
+        # clear_btn = QPushButton("Clear Markers")
+        # clear_btn.clicked.connect(self._clear_markers)
+        # clear_btn.setFixedHeight(40)
+        # markers_layout.addWidget(clear_btn)
 
         markers_layout.addStretch()
         splitter.addWidget(markers_container)
