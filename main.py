@@ -52,6 +52,7 @@ class MainWindow(QMainWindow):
         self.editor_panel.blurRequested.connect(self._on_blur_requested)
         self.editor_panel.thumbnailClicked.connect(self._on_thumbnail_clicked)
         self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
+        self.editor_panel.exportRequested.connect(self._on_save_project)
 
         # ─── Playback timer (used when playing back video) ───────────────
         self.play_timer = QTimer()
@@ -193,6 +194,7 @@ class MainWindow(QMainWindow):
         self.editor_panel.blurRequested.connect(self._on_blur_requested)
         self.editor_panel.thumbnailClicked.connect(self._on_thumbnail_clicked)
         self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
+        self.editor_panel.exportRequested.connect(self._on_save_project)
 
         # 4) Initialize the new panel with the video info:
         self.editor_panel.set_video_info(
@@ -560,6 +562,13 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+
+    def _on_export_video_requested(self):
+        """
+        Called when the 'Export Video' button is clicked.
+        Calls the same method as Save Project to export the video.
+        """
+        self._on_save_project()  # This method already handles exporting the video
 
 
 if __name__ == "__main__":

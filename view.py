@@ -102,6 +102,7 @@ class EditorPanel(QWidget):
     blurRequested      = pyqtSignal(int)  # User clicked “Blur Frame” on current frame
     thumbnailClicked   = pyqtSignal(int)  # User clicked a thumbnail (frameIdx)
     gestureItemClicked = pyqtSignal(int)  # User clicked a gesture‐list item (frameIdx)
+    exportRequested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -234,6 +235,11 @@ class EditorPanel(QWidget):
         self.blur_button.clicked.connect(lambda: self.blurRequested.emit(self.current_frame_idx))
         btn_row.addWidget(self.blur_button)
 
+        self.export_button = QPushButton("Export Video")
+        self.export_button.setEnabled(False)  # Make sure it's enabled
+        self.export_button.clicked.connect(lambda: self.exportRequested.emit())
+        btn_row.addWidget(self.export_button)
+
         video_layout.addLayout(btn_row)
         splitter.addWidget(video_container)
 
@@ -362,6 +368,7 @@ class EditorPanel(QWidget):
         self.toggle_button.setText("Play")
         self.detect_button.setEnabled(True)
         self.blur_button.setEnabled(True)
+        self.export_button.setEnabled(True)
 
         self.time_ruler.setVideoInfo(total_frames, fps)
 
