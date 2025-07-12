@@ -1,15 +1,13 @@
-# editor_core.py
-
 import cv2
 import mediapipe as mp
 from utilities import (
     WaveDetector,
     get_video_rotation,
     generate_thumbnails,
-    blur_faces_in_frame,
-    blur_faces_of_person
+    blur_faces_of_person,
+    HandOverFaceDetector,
+    match_person_id
 )
-
 
 class EditorCore:
     """
@@ -65,101 +63,82 @@ class EditorCore:
         # That helper already returns (frame_idx, RGB numpy)
         return thumbs
 
-    def manually_blur_frame(self, frame_idx: int):
-        """
-        Blur exactly frame_idx (faces only), cache it in blurred_cache & blurred_frames.
-        Returns the blurred BGR numpy array.
-        """
-        if self.cap is None:
-            return None
+    # def manually_blur_frame(self, frame_idx: int):
+    #     """
+    #     Blur exactly frame_idx (faces only), cache it in blurred_cache & blurred_frames.
+    #     Returns the blurred BGR numpy array.
+    #     """
+    #     if self.cap is None:
+    #         return None
 
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = self.cap.read()
-        if not ret:
-            return None
+    #     self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    #     ret, frame = self.cap.read()
+    #     if not ret:
+    #         return None
 
-        blurred = blur_faces_in_frame(frame)
-        self.blurred_frames.add(frame_idx)
-        self.blurred_cache[frame_idx] = blurred
-        return blurred
+    #     blurred = blur_faces_of_person(frame)
+    #     self.blurred_frames.add(frame_idx)
+    #     self.blurred_cache[frame_idx] = blurred
+    #     return blurred
 
     def detect_and_blur_hand_segments(self, progress_callback=None):
         """
-        1) Detect waves → [(wave_frame, pose_landmarks), …].
-        2) For each, find entry (backwards scan) & exit (forwards scan).
-        3) Blur that person’s face on every frame in [entry, exit].
-        Returns list of wave_frame indices.
+        Uses WaveDetector and HandOverFaceDetector to find gestures.
+        Stores only first occurrence per person per gesture type.
+        Returns list of (person_id, gesture_type, frame_idx).
         """
         if not self.video_path:
             return []
 
-        # 1) gesture detection
+        # Initialize detectors
         wave_detector = WaveDetector(self.video_path, self.fps)
-        wave_data = wave_detector.detect_wave_timestamps(
-            show_ui=False,
-            frame_skip=3
-        )  # List of (frame_idx, pose_landmarks)
-        if not wave_data:
-            return []
+        wave_data = wave_detector.detect_wave_timestamps(show_ui=False, frame_skip=3)
 
+        cover_detector = HandOverFaceDetector(self.video_path, self.fps)
+        cover_data = cover_detector.detect_hand_over_face_frames(show_ui=False, frame_skip=3)
+
+        # Existing persons dict: person_id -> landmarks
+        existing_people = {}
+
+        # Final data: {person_id: {gesture_type: (frame_idx, landmarks)}}
+        person_gestures = {}
+
+        def process_gesture(data, gesture_type):
+            for frame_idx, landmarks in data:
+                person_id = match_person_id(existing_people, landmarks)
+                if person_id not in person_gestures:
+                    person_gestures[person_id] = {}
+                if gesture_type not in person_gestures[person_id]:
+                    person_gestures[person_id][gesture_type] = (frame_idx, landmarks)
+
+        # Process both gestures
+        process_gesture(wave_data, "wave")
+        process_gesture(cover_data, "cover_face")
+
+        # Flatten results
+        gesture_timestamps = []
         cap = cv2.VideoCapture(self.video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        # 2) build (entry, exit, landmarks) windows
-        windows = []
-        with mp.solutions.pose.Pose() as pose_detector:
-            for wave_frame, target_landmarks in wave_data:
-                wf = int(wave_frame)
+        for person_id, gestures in person_gestures.items():
+            for gesture_type, (frame_idx, landmarks) in gestures.items():
+                gesture_timestamps.append((person_id, gesture_type, frame_idx, landmarks))
 
-                # 2a) backwards scan → entry
-                entry = wf
-                while entry > 0:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, entry - 1)
-                    ret, prev = cap.read()
-                    if not ret:
-                        break
-                    prev_rgb = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
-                    if pose_detector.process(prev_rgb).pose_landmarks is None:
-                        break
-                    entry -= 1
+                # Blur this person at their first gesture timestamp
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
 
-                # 2b) forwards scan → exit
-                exit = wf
-                while exit < total_frames - 1:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, exit + 1)
-                    ret, nxt = cap.read()
-                    if not ret:
-                        break
-                    nxt_rgb = cv2.cvtColor(nxt, cv2.COLOR_BGR2RGB)
-                    if pose_detector.process(nxt_rgb).pose_landmarks is None:
-                        break
-                    exit += 1
+                blurred = blur_faces_of_person(frame, landmarks)
+                self.blurred_frames.add(frame_idx)
+                self.blurred_cache[frame_idx] = blurred
 
-                windows.append((entry, exit, target_landmarks))
-
-        # 3) blur frames in each window
-        for i in range(total_frames):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-            ret, frame = cap.read()
-            if not ret:
-                continue
-
-            for entry, exit, landmarks in windows:
-                if entry <= i <= exit:
-                    # uses your tested for_testing logic with tolerance
-                    blurred = blur_faces_of_person(frame, landmarks, tolerance=1.0)
-                    self.blurred_frames.add(i)
-                    self.blurred_cache[i] = blurred
-                    break
-
-            if progress_callback:
-                progress_callback(i + 1)
+                if progress_callback:
+                    progress_callback(frame_idx + 1)
 
         cap.release()
-        # 4) return the raw wave frames for your UI list
-        return [int(wf) for wf, _ in wave_data]
-
-
+        return gesture_timestamps
 
     def get_frame(self, frame_idx: int):
         """
@@ -198,7 +177,7 @@ class EditorCore:
             if i in self.blurred_frames and i in self.blurred_cache:
                 out.write(self.blurred_cache[i])
             elif i in self.blurred_frames:
-                out.write(blur_faces_in_frame(frame))
+                out.write(blur_faces_of_person(frame))
             else:
                 out.write(frame)
 

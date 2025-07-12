@@ -23,7 +23,7 @@ import time
 
 from view import EditorPanel
 from model import EditorCore
-from utils import blur_faces_of_person
+from utilities import blur_faces_of_person
 
 class GestureDetectWorker(QThread):
     finished = pyqtSignal(object)  # Will emit segment_starts

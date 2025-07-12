@@ -1,12 +1,8 @@
-# video_utils.py
-
 import cv2
 import subprocess
 import json
 import numpy as np
 import mediapipe as mp
-
-
 
 # Reads the rotation angle metadata from a video file using ffprobe.
 # Returns 0 if no rotation metadata is found.
@@ -61,10 +57,16 @@ class WaveDetector:
         self.video_path = video_path
         self.fps = fps or 30.0
         self.hands = mp.solutions.hands.Hands(
-            max_num_hands=2,
+            max_num_hands=1,
             min_detection_confidence=detection_confidence
         )
-        self.pose = mp.solutions.pose.Pose()
+        self.pose = mp.solutions.pose.Pose(
+            static_image_mode=False,
+            model_complexity=2,
+            min_detection_confidence=0.8,
+            min_tracking_confidence=0.8
+        )
+
         self.drawer = mp.solutions.drawing_utils
 
     def detect_wave_timestamps(self, show_ui=True, frame_skip=3):
@@ -174,7 +176,7 @@ class HandOverFaceDetector:
                             dist = np.hypot(nose_x - hand_x, nose_y - hand_y)
 
                             if dist < 40:
-                                hand_over_face_frames.append(frame_count / self.fps)
+                                hand_over_face_frames.append((frame_count, pose_result.pose_landmarks.landmark))
                                 print(f"Hand over face at frame {frame_count}")
                                 break
                         else:
@@ -206,7 +208,7 @@ class HandOverFaceDetector:
 # Used after detecting gesture to blur only that specific individual.
 last_face_box = None  # Global cache for the last known face box
 
-def blur_faces_of_person(frame, target_landmarks, tolerance=0.05):
+def blur_faces_of_person(frame, target_landmarks, tolerance=0.7):
 
     global last_face_box
 
@@ -276,38 +278,19 @@ def blur_faces_of_person(frame, target_landmarks, tolerance=0.05):
     mp_pose.close()
     return np.where(mask == 255, blurred, frame)
 
-
-# NEW 7/2
-def blur_faces_in_frame(frame):
+def match_person_id(existing_people, new_landmarks, tolerance=0.7):
     """
-    Detect **all** faces in the frame and Gaussian-blur them.
+    Match new_landmarks to existing people. Returns person_id if matched, else new ID.
+    existing_people: dict of person_id -> landmarks
     """
-    
-    # Initialize FaceDetection once per call
-    face_detector = mp.solutions.face_detection.FaceDetection(
-        min_detection_confidence=0.7
-    )
-
-    # Run detection
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_detector.process(frame_rgb)
-    h, w, _ = frame.shape
-
-    # Build a mask of all face-regions
-    mask = np.zeros_like(frame)
-    if results.detections:
-        for det in results.detections:
-            box = det.location_data.relative_bounding_box
-            x = int(box.xmin * w)
-            y = int(box.ymin * h)
-            bw = int(box.width * w)
-            bh = int(box.height * h)
-            x, y = max(0, x), max(0, y)
-            bw = min(bw, w - x)
-            bh = min(bh, h - y)
-            mask[y:y+bh, x:x+bw] = 255
-
-    # Blur everywhere the mask is set
-    blurred = cv2.GaussianBlur(frame, (55, 55), 0)
-    face_detector.close()
-    return np.where(mask == 255, blurred, frame)
+    for pid, landmarks in existing_people.items():
+        total_diff = sum(np.hypot(landmarks[i].x - new_landmarks[i].x,
+                                  landmarks[i].y - new_landmarks[i].y)
+                         for i in range(len(landmarks)))
+        avg_diff = total_diff / len(landmarks)
+        if avg_diff < tolerance:
+            return pid
+    # New person
+    new_id = len(existing_people) + 1
+    existing_people[new_id] = new_landmarks
+    return new_id
