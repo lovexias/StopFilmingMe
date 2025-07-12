@@ -9,7 +9,9 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QProgressDialog,
-    QListWidgetItem
+    QListWidgetItem,
+    QLabel,
+    QProgressBar
 )
 
 from PyQt5.QtGui import QPixmap, QIcon, QPainter, QFont, QColor, QPen, QBrush
@@ -477,6 +479,35 @@ class MainWindow(QMainWindow):
             }
         """)
 
+        self.elapsed_label = QLabel("00:00", self.progress)
+        self.elapsed_label.setStyleSheet("""
+            color: #fff;
+            font-size: 12px;
+            font-weight: normal;
+            background: transparent;
+        """)
+        self.elapsed_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        # Position it precisely over the right edge of the progress bar
+        progress_bar = self.progress.findChild(QProgressBar)
+        if progress_bar:
+            progress_bar_rect = progress_bar.geometry()
+            label_width = 40
+            label_height = 20
+            self.elapsed_label.setGeometry(
+                progress_bar_rect.right() - label_width + 2,
+                progress_bar_rect.top() + (progress_bar_rect.height() - label_height) // 2,
+                label_width,
+                label_height
+            )
+        self.elapsed_label.show()
+
+        # Timer for updating elapsed time
+        self._detect_start_time = time.time()
+        self._detect_timer = QTimer(self.progress)
+        self._detect_timer.timeout.connect(self._update_detect_elapsed)
+        self._detect_timer.start(500)
+
         self.progress.show()
         QApplication.processEvents()
 
@@ -489,6 +520,13 @@ class MainWindow(QMainWindow):
         self.detect_thread.finished.connect(self._on_gesture_detection_finished)
         self.detect_thread.start()
 
+    def _update_detect_elapsed(self):
+        if hasattr(self, "_detect_start_time") and hasattr(self, "elapsed_label"):
+            elapsed = int(time.time() - self._detect_start_time)
+            mm = elapsed // 60
+            ss = elapsed % 60
+            self.elapsed_label.setText(f"{mm:02d}:{ss:02d}")
+    
     def _on_gesture_detection_finished(self, segment_starts):
         self.progress.close()
 
