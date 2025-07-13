@@ -1,5 +1,3 @@
-# main.py
-
 import sys
 import webbrowser
 from PyQt5.QtWidgets import (
@@ -26,6 +24,9 @@ import time
 from view import EditorPanel
 from model import EditorCore
 from utilities import blur_faces_of_person
+from utilities import detect_and_blur_multiple_people
+from utilities import detect_multiple_skeletons_yolov8
+from utilities import match_person_id
 
 class GestureDetectWorker(QThread):
     finished = pyqtSignal(object)  # Will emit segment_starts
@@ -41,6 +42,7 @@ class GestureDetectWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        #self.frame_skip = 60
         self.setWindowIcon(create_eye_icon())
         self.setWindowTitle("StopFilming - Privacy Protection Video Editor")
 
@@ -406,7 +408,7 @@ class MainWindow(QMainWindow):
 
     def _on_timer_tick(self):
         """
-        Called every ~1000/fps ms while playing.  Grab the next frame from cv2.VideoCapture,
+        Called every ~1000/fps ms while playing. Grab the next frame from cv2.VideoCapture,
         overlay blur if needed, and display it in the UI.
         """
         ret, frame = self.core.cap.read()
@@ -416,9 +418,15 @@ class MainWindow(QMainWindow):
             return
 
         pos = int(self.core.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+
+        # Don't skip frames during playback: just display the current frame
         img = self.core.blurred_cache.get(pos, frame)
         self.editor_panel.display_frame(img, pos)
 
+        # Apply blurring and detection only for the current frame
+        frame = detect_and_blur_multiple_people(frame, frame_count=pos)  # Process every frame (frame_skip=1)
+        img = self.core.blurred_cache.get(pos, frame)
+        self.editor_panel.display_frame(img, pos)
 
     def _on_detect_requested(self):
         """
@@ -615,7 +623,7 @@ class MainWindow(QMainWindow):
         progress.show()
         QApplication.processEvents()
 
-        # ─── Blur all frames for the person ──────────────────────────────
+        # Loop through frames and blur the selected person's face
         cap = cv2.VideoCapture(self.core.video_path)
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
@@ -625,18 +633,18 @@ class MainWindow(QMainWindow):
             if not ret:
                 continue
 
-            blurred = blur_faces_of_person(frame, target_landmarks)
+            # Apply blurring to the selected person
+            blurred = blur_faces_of_person(frame, target_landmarks_list=[target_landmarks])
             self.core.blurred_frames.add(i)
             self.core.blurred_cache[i] = blurred
 
-            if i % 10 == 0:
-                progress.setValue(i + 1)
-                QApplication.processEvents()
+            progress.setValue(i + 1)
+            QApplication.processEvents()
 
         cap.release()
         progress.close()
 
-        # ─── Jump to preview of selected frame ───────────────────────────
+        # Display the selected frame after blurring
         if frame_idx in self.core.blurred_cache:
             img = self.core.blurred_cache[frame_idx]
         else:

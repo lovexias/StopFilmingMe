@@ -130,7 +130,7 @@ class EditorCore:
                 if not ret:
                     continue
 
-                blurred = blur_faces_of_person(frame, landmarks)
+                blurred = blur_faces_of_person(frame, [landmarks])
                 self.blurred_frames.add(frame_idx)
                 self.blurred_cache[frame_idx] = blurred
 
