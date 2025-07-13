@@ -15,10 +15,10 @@ mp_pose_global = mp.solutions.pose.Pose()
 
 # ──────────────────────────────────────────────────────────────
 
-def detect_multiple_skeletons_yolov8(frame, conf_threshold=0.7):
+def detect_multiple_skeletons_yolov8(frame, conf_threshold=0.15):
     """
     Detects multiple skeletons in a frame using YOLOv8 pose model.
-    Returns a list of (keypoints, bbox) tuples, filtering out low-confidence or partial detections.
+    Returns a list of detected persons with their keypoints in (x, y) pixel coordinates.
     """
     results = yolo_model(frame)[0]
     detections = []
@@ -30,22 +30,13 @@ def detect_multiple_skeletons_yolov8(frame, conf_threshold=0.7):
         boxes = results.boxes.xyxy.cpu().numpy() if results.boxes else []
 
         for i, person_kpts in enumerate(kpts):
-            mean_conf = scores[i].mean()
-            if mean_conf < conf_threshold:
-                continue
-
-            # NEW: Filter out skeletons with too few valid keypoints
-            keypoint_confs = scores[i].cpu().numpy()
-            valid_count = (keypoint_confs > 0.3).sum()
-            if valid_count < 15:
+            if scores[i].mean() < conf_threshold:
                 continue
 
             # Convert normalized keypoints to pixel coordinates
             person_kpts = person_kpts.cpu().numpy()
-            pixel_kpts = [(int(x * w), int(y * h)) for x, y in person_kpts]
-
-            bbox = boxes[i] if i < len(boxes) else None
-            detections.append((pixel_kpts, bbox))
+            person_kpts = [(int(x * w), int(y * h)) for x, y in person_kpts]
+            detections.append(person_kpts)
 
     return detections
 
@@ -101,17 +92,24 @@ class WaveDetector:
     def __init__(self, video_path, fps, detection_confidence=0.8):
         self.video_path = video_path
         self.fps = fps or 30.0
-        self.hands = mp.solutions.hands.Hands(max_num_hands=1, min_detection_confidence=detection_confidence)
-        self.pose = mp.solutions.pose.Pose(static_image_mode=False, model_complexity=2,
-                                           min_detection_confidence=0.8, min_tracking_confidence=0.8)
+        self.hands = mp.solutions.hands.Hands(
+            max_num_hands=1,
+            min_detection_confidence=detection_confidence
+        )
+        self.pose = mp.solutions.pose.Pose(
+            static_image_mode=False,
+            model_complexity=2,
+            min_detection_confidence=0.8,
+            min_tracking_confidence=0.8
+        )
         self.drawer = mp.solutions.drawing_utils
 
     def detect_wave_timestamps(self, show_ui=True, frame_skip=3):
         cap = cv2.VideoCapture(self.video_path)
         frame_count = 0
         detected = []
-        existing_people = {}
-        person_movements = {}
+        last_x = None
+        movement_history = []
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -123,73 +121,38 @@ class WaveDetector:
                 continue
 
             frame = cv2.resize(frame, (640, 360))
-            h, w, _ = frame.shape
-            yolo_results = yolo_model(frame)[0]
-            if hasattr(yolo_results, "keypoints") and yolo_results.keypoints is not None:
-                print(f"[Frame {frame_count}] People detected: {len(yolo_results.keypoints.xy)}")
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            hand_results = self.hands.process(frame_rgb)
+            pose_results = self.pose.process(frame_rgb)
 
-            if not hasattr(yolo_results, "keypoints") or yolo_results.keypoints is None:
-                frame_count += 1
-                continue
+            skeletons = detect_multiple_skeletons_yolov8(frame)
 
-            keypoints = yolo_results.keypoints.xy
-            scores = yolo_results.keypoints.conf
+            if hand_results.multi_hand_landmarks and pose_results.pose_landmarks:
+                for hand_landmarks in hand_results.multi_hand_landmarks:
+                    if show_ui:
+                        self.drawer.draw_landmarks(frame, hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS)
 
-            for i, kpts in enumerate(keypoints):
-                if scores[i].mean() < 0.15:
-                    continue
-                person_kpts = kpts.cpu().numpy()
-                xs = [int(x * w) for x, y in person_kpts]
-                ys = [int(y * h) for x, y in person_kpts]
-                x1, x2 = max(0, min(xs)), min(w, max(xs))
-                y1, y2 = max(0, min(ys)), min(h, max(ys))
-                if x2 - x1 <= 0 or y2 - y1 <= 0:
-                    continue
+                    xs = [lm.x for lm in hand_landmarks.landmark]
+                    media_x = sum(xs) / len(xs)
+                    direction = None
+                    if last_x is not None:
+                        threshold = 0.005
+                        if media_x < last_x - threshold:
+                            direction = "left"
+                        elif media_x > last_x + threshold:
+                            direction = "right"
+                        if direction and (not movement_history or movement_history[-1][0] != direction):
+                            movement_history.append((direction, frame_count, pose_results.pose_landmarks.landmark))
 
-                crop = frame[y1:y2, x1:x2]
-                if crop.size == 0:
-                    continue
+                    movement_history = [(d, f, l) for d, f, l in movement_history if frame_count - f <= self.fps]
+                    if len(movement_history) >= 4:
+                        print(f"Wave detected at frame {frame_count}")
+                        detected.append((frame_count, pose_results.pose_landmarks.landmark))
+                        movement_history.clear()
+                    last_x = media_x
 
-                rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                hand_result = self.hands.process(rgb_crop)
-                pose_result = self.pose.process(rgb_crop)
-                if not pose_result.pose_landmarks:
-                    print(f"[Frame {frame_count}] ❌ No pose detected")
-                if not hand_result.multi_hand_landmarks:
-                    print(f"[Frame {frame_count}] ❌ No hand detected")
-
-
-                if hand_result.multi_hand_landmarks and pose_result.pose_landmarks:
-                    landmarks = pose_result.pose_landmarks.landmark
-                    person_id = match_person_id(existing_people, landmarks)
-
-                    for hand_landmarks in hand_result.multi_hand_landmarks:
-                        xs = [lm.x for lm in hand_landmarks.landmark]
-                        media_x = sum(xs) / len(xs)
-
-                        if person_id not in person_movements:
-                            person_movements[person_id] = {"last_x": None, "history": []}
-                        movement_data = person_movements[person_id]
-
-                        last_x = movement_data["last_x"]
-                        direction = None
-                        if last_x is not None:
-                            if media_x < last_x - 0.005:
-                                direction = "left"
-                            elif media_x > last_x + 0.005:
-                                direction = "right"
-                            if direction and (not movement_data["history"] or movement_data["history"][-1][0] != direction):
-                                movement_data["history"].append((direction, frame_count, landmarks))
-
-                        movement_data["last_x"] = media_x
-                        movement_data["history"] = [entry for entry in movement_data["history"]
-                                                    if frame_count - entry[1] <= self.fps]
-                        if len(movement_data["history"]) >= 4:
-                            print(f"Wave detected for person {person_id} at frame {frame_count}")
-                            detected.append((frame_count, landmarks))
-                            print(f"✅ Hand over face detected for person {person_id} at frame {frame_count}")
-
-                            movement_data["history"].clear()
+                if show_ui:
+                    self.drawer.draw_landmarks(frame, pose_results.pose_landmarks, mp.solutions.pose.POSE_CONNECTIONS)
 
             if show_ui:
                 cv2.imshow("Wave Detection", frame)
@@ -212,14 +175,16 @@ class HandOverFaceDetector:
         self.video_path = video_path
         self.fps = fps or 30.0
         self.pose = mp.solutions.pose.Pose(min_detection_confidence=detection_confidence)
-        self.hands = mp.solutions.hands.Hands(max_num_hands=2, min_detection_confidence=detection_confidence)
+        self.hands = mp.solutions.hands.Hands(
+            max_num_hands=2,
+            min_detection_confidence=detection_confidence
+        )
         self.drawer = mp.solutions.drawing_utils
 
     def detect_hand_over_face_frames(self, show_ui=True, frame_skip=3):
         cap = cv2.VideoCapture(self.video_path)
         frame_count = 0
-        detected = []
-        existing_people = {}
+        hand_over_faces_frames = []
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -231,63 +196,36 @@ class HandOverFaceDetector:
                 continue
 
             frame = cv2.resize(frame, (640, 360))
-            h, w, _ = frame.shape
-            yolo_results = yolo_model(frame)[0]
-            if hasattr(yolo_results, "keypoints") and yolo_results.keypoints is not None:
-                 print(f"[Frame {frame_count}] People detected: {len(yolo_results.keypoints.xy)}")
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            if not hasattr(yolo_results, "keypoints") or yolo_results.keypoints is None:
-                frame_count += 1
-                continue
+            pose_result = self.pose.process(frame_rgb)
+            hands_result = self.hands.process(frame_rgb)
 
-            keypoints = yolo_results.keypoints.xy
-            scores = yolo_results.keypoints.conf
+            if pose_result.pose_landmarks:
+                nose = pose_result.pose_landmarks.landmark[mp.solutions.pose.PoseLandmark.NOSE]
+                nose_x, nose_y = int(nose.x * frame.shape[1]), int(nose.y * frame.shape[0])
 
-            for i, kpts in enumerate(keypoints):
-                if scores[i].mean() < 0.15:
-                    continue
-                person_kpts = kpts.cpu().numpy()
-                xs = [int(x * w) for x, y in person_kpts]
-                ys = [int(y * h) for x, y in person_kpts]
-                x1, x2 = max(0, min(xs)), min(w, max(xs))
-                y1, y2 = max(0, min(ys)), min(h, max(ys))
-                if x2 - x1 <= 0 or y2 - y1 <= 0:
-                    continue
-
-                crop = frame[y1:y2, x1:x2]
-                if crop.size == 0:
-                    continue
-
-                rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                pose_result = self.pose.process(rgb_crop)
-                hand_result = self.hands.process(rgb_crop)
-                if not pose_result.pose_landmarks:
-                    print(f"[Frame {frame_count}] ❌ No pose detected")
-                if not hand_result.multi_hand_landmarks:
-                    print(f"[Frame {frame_count}] ❌ No hand detected")
-
-                if pose_result.pose_landmarks and hand_result.multi_hand_landmarks:
-                    landmarks = pose_result.pose_landmarks.landmark
-                    person_id = match_person_id(existing_people, landmarks)
-                    nose = landmarks[mp.solutions.pose.PoseLandmark.NOSE]
-                    nose_x, nose_y = int(nose.x * crop.shape[1]), int(nose.y * crop.shape[0])
-
-                    for hand_landmarks in hand_result.multi_hand_landmarks:
+            if hands_result.multi_hand_landmarks:
+                    for hand_landmarks in hands_result.multi_hand_landmarks:
                         for lm in hand_landmarks.landmark:
-                            hand_x = int(lm.x * crop.shape[1])
-                            hand_y = int(lm.y * crop.shape[0])
+                            hand_x = int(lm.x * frame.shape[1])
+                            hand_y = int(lm.y * frame.shape[0])
                             dist = np.hypot(nose_x - hand_x, nose_y - hand_y)
 
                             if dist < 40:
-                                print(f"Hand over face detected for person {person_id} at frame {frame_count}")
-                                detected.append((frame_count, landmarks))
-                                print(f"✅ Wave detected for person {person_id} at frame {frame_count}")
+                                hand_over_face_frames.append((frame_count, pose_result.pose_landmarks.landmark))
+                                print(f"Hand over face at frame {frame_count}")
                                 break
                         else:
                             continue
                         break
 
             if show_ui:
+                if pose_result.pose_landmarks:
+                    self.drawer.draw_landmarks(frame, pose_result.pose_landmarks, mp.solutions.pose.POSE_CONNECTIONS)
+                if hands_result.multi_hand_landmarks:
+                    for hand_landmarks in hands_result.multi_hand_landmarks:
+                        self.drawer.draw_landmarks(frame, hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS)
                 cv2.imshow("Hand Over Face Detection", frame)
                 if cv2.waitKey(int(1000 / self.fps)) & 0xFF == ord('q'):
                     break
@@ -295,12 +233,12 @@ class HandOverFaceDetector:
             frame_count += 1
 
         cap.release()
-        self.hands.close()
         self.pose.close()
+        self.hands.close()
         if show_ui:
             cv2.destroyAllWindows()
 
-        return detected
+        return hand_over_faces_frames
 
 # Blurs only the face of a person whose pose matches the target skeleton landmarks.
 # Used after detecting gesture to blur only that specific individual.
