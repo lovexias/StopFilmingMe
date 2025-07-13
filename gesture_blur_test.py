@@ -136,7 +136,7 @@ def main():
     frame_count = 0
     frame_time = 1.0 / fps if fps > 0 else 1.0 / 30.0  # Safe division
     gesture_count = 0
-    global_frame_skip = 120  # Process everything every 120 frames (4 seconds at 30fps)
+    global_frame_skip = 60  # Process everything every 60 frames (2 seconds at 30fps)
     
     # Track which people have been processed to avoid re-processing
     processed_people = set()  # Store (frame_num, person_index) to avoid duplicates
