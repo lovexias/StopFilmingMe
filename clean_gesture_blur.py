@@ -310,7 +310,7 @@ def first_pass_detect_gestures(video_path, fps, rotation):
 def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, frame_width, frame_height):
     """
     Second pass: Create clean output video with only the necessary face blurring.
-    Optimized: Run YOLO every 30 frames, use last detection for intermediate frames.
+    No YOLO - only MediaPipe for face detection on predefined blur regions.
     """
     print("\nPASS 2: Creating clean blurred video...")
     
@@ -325,10 +325,6 @@ def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, fr
     frame_count = 0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    # Optimization: Run YOLO every 30 frames, use last detection for others
-    yolo_skip_frames = 30  # Run YOLO every 30 frames (1 second at 30fps)
-    last_people_detected = []
-    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -342,49 +338,45 @@ def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, fr
         elif rotation == 270:
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         
-        # Run YOLO every 30 frames, otherwise use last detection
-        if frame_count % yolo_skip_frames == 0:
-            people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-            last_people_detected = people_detected
-            if frame_count % 300 == 0:  # Progress update every 10 seconds
-                print(f"  YOLO detection update at frame {frame_count} - Found {len(people_detected)} people")
-        else:
-            # Use last YOLO detection for intermediate frames
-            people_detected = last_people_detected
-        
-        # Blur faces of people who should be permanently blurred
-        if people_to_blur and people_detected:
-            for x1, y1, x2, y2 in people_detected:
-                # Check if this person should be blurred
-                if match_person_to_blur_list((x1, y1, x2, y2), people_to_blur):
-                    # Extract person region for face detection
-                    person_crop = frame[y1:y2, x1:x2]
-                    if person_crop.size == 0:
-                        continue
+        # Blur faces in predefined regions (no YOLO needed)
+        if people_to_blur:
+            # Use full frame for face detection in predefined blur regions
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            face_result = mp_face.process(frame_rgb)
+            
+            if face_result.detections:
+                for detection in face_result.detections:
+                    box = detection.location_data.relative_bounding_box
+                    # Convert relative coordinates to absolute coordinates
+                    fx = int(box.xmin * frame_width)
+                    fy = int(box.ymin * frame_height)
+                    fw = int(box.width * frame_width)
+                    fh = int(box.height * frame_height)
                     
-                    # Detect and blur face within this person's bounding box
-                    person_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
-                    face_result = mp_face.process(person_rgb)
+                    # Ensure coordinates are within frame bounds
+                    fx, fy = max(0, fx), max(0, fy)
+                    fw = min(fw, frame.shape[1] - fx)
+                    fh = min(fh, frame.shape[0] - fy)
                     
-                    if face_result.detections:
-                        for detection in face_result.detections:
-                            box = detection.location_data.relative_bounding_box
-                            # Convert relative coordinates to absolute coordinates
-                            fx = int(box.xmin * (x2 - x1)) + x1
-                            fy = int(box.ymin * (y2 - y1)) + y1
-                            fw = int(box.width * (x2 - x1))
-                            fh = int(box.height * (y2 - y1))
-                            
-                            # Ensure coordinates are within frame bounds
-                            fx, fy = max(0, fx), max(0, fy)
-                            fw = min(fw, frame.shape[1] - fx)
-                            fh = min(fh, frame.shape[0] - fy)
-                            
-                            # Apply blur to face region
-                            if fw > 0 and fh > 0:
-                                face_roi = frame[fy:fy+fh, fx:fx+fw]
-                                blurred_face = cv2.GaussianBlur(face_roi, (55, 55), 0)
-                                frame[fy:fy+fh, fx:fx+fw] = blurred_face
+                    # Check if this face is in a region that should be blurred
+                    face_center = (fx + fw // 2, fy + fh // 2)
+                    should_blur = False
+                    
+                    for blur_person in people_to_blur:
+                        person_center = blur_person['center']
+                        # Use a larger tolerance for face-to-person matching
+                        distance = ((face_center[0] - person_center[0])**2 + 
+                                  (face_center[1] - person_center[1])**2)**0.5
+                        
+                        if distance < 200:  # Adjust tolerance as needed
+                            should_blur = True
+                            break
+                    
+                    # Apply blur to face region if it should be blurred
+                    if should_blur and fw > 0 and fh > 0:
+                        face_roi = frame[fy:fy+fh, fx:fx+fw]
+                        blurred_face = cv2.GaussianBlur(face_roi, (55, 55), 0)
+                        frame[fy:fy+fh, fx:fx+fw] = blurred_face
         
         # Write clean frame to output video
         video_writer.write(frame)
@@ -392,8 +384,7 @@ def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, fr
         # Progress indicator
         if frame_count % 100 == 0:
             progress = (frame_count / total_frames) * 100
-            yolo_calls = (frame_count // yolo_skip_frames) + 1
-            print(f"  Progress: {progress:.1f}% ({frame_count}/{total_frames} frames) | YOLO calls: {yolo_calls}")
+            print(f"  Progress: {progress:.1f}% ({frame_count}/{total_frames} frames)")
         
         frame_count += 1
     
@@ -402,11 +393,9 @@ def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, fr
     video_writer.release()
     mp_face.close()
     
-    total_yolo_calls = (frame_count // yolo_skip_frames) + 1
     print(f"\nPASS 2 COMPLETE:")
     print(f"- Processed {frame_count} frames")
-    print(f"- YOLO calls: {total_yolo_calls} (vs {frame_count} without optimization)")
-    print(f"- Performance improvement: {((frame_count - total_yolo_calls) / frame_count * 100):.1f}% fewer YOLO calls")
+    print(f"- Used MediaPipe only for face detection (no YOLO)")
     print(f"- Clean video saved to: {OUTPUT_PATH}")
 
 def main():
