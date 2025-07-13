@@ -6,7 +6,7 @@ import mediapipe as mp
 from ultralytics import YOLO
 
 # Initialize YOLOv8 model globally (adjust path as needed)
-yolo_model = YOLO('yolov8m-pose.pt')  # Use your pose model path here
+yolo_model = YOLO('yolov8m.pt')  # Use regular detection model for person detection
 
 # ──────────────────────────────────────────────────────────────
 # ADDITION: Initialize MediaPipe solutions globally for reuse
@@ -15,27 +15,24 @@ mp_pose_global = mp.solutions.pose.Pose()
 
 # ──────────────────────────────────────────────────────────────
 
-def detect_multiple_skeletons_yolov8(frame, conf_threshold=0.15):
+def detect_multiple_people_yolov8(frame, conf_threshold=0.5):
     """
-    Detects multiple skeletons in a frame using YOLOv8 pose model.
-    Returns a list of detected persons with their keypoints in (x, y) pixel coordinates.
+    Detects multiple people in a frame using YOLOv8 detection model.
+    Returns a list of detected person bounding boxes in (x1, y1, x2, y2) format.
     """
     results = yolo_model(frame)[0]
     detections = []
-    h, w, _ = frame.shape
-
-    if hasattr(results, "keypoints") and results.keypoints is not None:
-        kpts = results.keypoints.xy
-        scores = results.keypoints.conf
-
-        for i, person_kpts in enumerate(kpts):
-            if scores[i].mean() < conf_threshold:
-                continue
-
-            person_kpts = person_kpts.cpu().numpy()
-            person_kpts = [(int(x * w), int(y * h)) for x, y in person_kpts]
-            detections.append(person_kpts)
-
+    
+    if hasattr(results, "boxes") and results.boxes is not None:
+        boxes = results.boxes
+        
+        for i, box in enumerate(boxes):
+            # Check if detection is a person (class 0 in COCO dataset)
+            if int(box.cls) == 0 and float(box.conf) >= conf_threshold:
+                # Get bounding box coordinates
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                detections.append((int(x1), int(y1), int(x2), int(y2)))
+    
     return detections
 
 def get_video_rotation(path):
@@ -122,7 +119,7 @@ class WaveDetector:
             hand_results = self.hands.process(frame_rgb)
             pose_results = self.pose.process(frame_rgb)
 
-            skeletons = detect_multiple_skeletons_yolov8(frame)
+            people = detect_multiple_people_yolov8(frame)
 
             if hand_results.multi_hand_landmarks and pose_results.pose_landmarks:
                 for hand_landmarks in hand_results.multi_hand_landmarks:
@@ -341,49 +338,38 @@ def match_person_id(existing_people, new_landmarks, tolerance=0.7):
 # ──────────────────────────────────────────────────────────────
 # detect_and_blur_multiple_people function using global solutions
 
-def detect_and_blur_multiple_people(frame, target_landmarks_list=None, conf_threshold=0.15, frame_count=0):
+def detect_and_blur_multiple_people(frame, target_landmarks_list=None, conf_threshold=0.5, frame_count=0):
     """
-    Detects multiple people using YOLOv8 pose and blurs their faces using MediaPipe.
+    Detects multiple people using YOLOv8 detection and blurs their faces using MediaPipe.
     Returns blurred frame.
     Uses globally initialized mp_face_global for efficiency.
     """
     h, w, _ = frame.shape
-    results = yolo_model(frame)[0]
+    people = detect_multiple_people_yolov8(frame, conf_threshold)
 
-    if hasattr(results, "keypoints") and results.keypoints is not None:
-        kpts = results.keypoints.xy
-        scores = results.keypoints.conf
+    for x1, y1, x2, y2 in people:
+        # Extract person region
+        person_crop = frame[y1:y2, x1:x2]
+        if person_crop.size == 0:
+            continue
 
-        for i, person_kpts in enumerate(kpts):
-            if scores[i].mean() < conf_threshold:
-                continue
+        person_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
+        face_result = mp_face_global.process(person_rgb)
 
-            person_kpts = person_kpts.cpu().numpy()
-            xs = [int(x * w) for x, y in person_kpts]
-            ys = [int(y * h) for x, y in person_kpts]
-            x1, x2 = max(0, min(xs)), min(w, max(xs))
-            y1, y2 = max(0, min(ys)), min(h, max(ys))
+        # Apply blurring to the face in every frame
+        if face_result.detections:
+            for detection in face_result.detections:
+                box = detection.location_data.relative_bounding_box
+                fx = int(box.xmin * (x2 - x1)) + x1
+                fy = int(box.ymin * (y2 - y1)) + y1
+                fw = int(box.width * (x2 - x1))
+                fh = int(box.height * (y2 - y1))
 
-            person_crop = frame[y1:y2, x1:x2]
-            if person_crop.size == 0:
-                continue
+                fx, fy = max(0, fx), max(0, fy)
+                fw, fh = min(fw, w - fx), min(fh, h - fy)
 
-            person_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
-            face_result = mp_face_global.process(person_rgb)
-
-            # Apply blurring to the face in every frame
-            if face_result.detections:
-                for detection in face_result.detections:
-                    box = detection.location_data.relative_bounding_box
-                    fx = int(box.xmin * (x2 - x1)) + x1
-                    fy = int(box.ymin * (y2 - y1)) + y1
-                    fw = int(box.width * (x2 - x1))
-                    fh = int(box.height * (y2 - y1))
-
-                    fx, fy = max(0, fx), max(0, fy)
-                    fw, fh = min(fw, w - fx), min(fh, h - fy)
-
-                    # Apply blur to the face area in real-time (every frame)
+                # Apply blur to the face area in real-time (every frame)
+                if fw > 0 and fh > 0:
                     face_roi = frame[fy:fy+fh, fx:fx+fw]
                     blurred_face = cv2.GaussianBlur(face_roi, (55, 55), 0)
                     frame[fy:fy+fh, fx:fx+fw] = blurred_face
