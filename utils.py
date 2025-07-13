@@ -114,7 +114,8 @@ class WaveDetector:
                 frame_count += 1
                 continue
 
-            frame = cv2.resize(frame, (640, 360))
+            # Remove forced resizing to preserve aspect ratio
+            # frame = cv2.resize(frame, (640, 360))  # REMOVED - was causing distortion
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             hand_results = self.hands.process(frame_rgb)
             pose_results = self.pose.process(frame_rgb)
@@ -192,7 +193,8 @@ class HandOverFaceDetector:
                 frame_count += 1
                 continue
 
-            frame = cv2.resize(frame, (640, 360))
+            # Remove forced resizing to preserve aspect ratio
+            # frame = cv2.resize(frame, (640, 360))  # REMOVED - was causing distortion
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             pose_result = self.pose.process(frame_rgb)

@@ -20,6 +20,99 @@ from utils import (
 video_path = "C:\\Users\\Layne\\Desktop\\RECORDINGS[CONFI]\\GH010048.mp4"
 GESTURE_TYPE = "wave"  # Change to "hand_over_face" to test the other detector
 
+def adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame_shape, target_aspect_ratio=0.6):
+    """
+    Adjust bounding box to have a more reasonable aspect ratio for person detection.
+    Target aspect ratio of 0.6 means width = 0.6 * height (typical person proportions)
+    
+    Args:
+        x1, y1, x2, y2: Original bounding box coordinates
+        frame_shape: (height, width) of the frame
+        target_aspect_ratio: Desired width/height ratio
+    
+    Returns:
+        (new_x1, new_y1, new_x2, new_y2): Adjusted bounding box coordinates
+    """
+    frame_height, frame_width = frame_shape[:2]
+    
+    # Get original dimensions
+    width = x2 - x1
+    height = y2 - y1
+    current_aspect_ratio = width / height if height > 0 else 1.0
+    
+    # If aspect ratio is already reasonable, return as-is
+    if 0.4 <= current_aspect_ratio <= 1.0:
+        return x1, y1, x2, y2
+    
+    # Center of the bounding box
+    center_x = (x1 + x2) // 2
+    center_y = (y1 + y2) // 2
+    
+    # Adjust to target aspect ratio
+    if current_aspect_ratio > 1.0:  # Too wide
+        # Keep height, adjust width
+        new_width = int(height * target_aspect_ratio)
+        new_x1 = max(0, center_x - new_width // 2)
+        new_x2 = min(frame_width, center_x + new_width // 2)
+        new_y1, new_y2 = y1, y2
+    else:  # Too narrow (very rare)
+        # Keep width, adjust height
+        new_height = int(width / target_aspect_ratio)
+        new_y1 = max(0, center_y - new_height // 2)
+        new_y2 = min(frame_height, center_y + new_height // 2)
+        new_x1, new_x2 = x1, x2
+    
+    return int(new_x1), int(new_y1), int(new_x2), int(new_y2)
+
+def expand_to_square_box(x1, y1, x2, y2, frame_shape, padding=20):
+    """
+    Expand bounding box to a square with padding for better MediaPipe processing.
+    
+    Args:
+        x1, y1, x2, y2: Original bounding box coordinates
+        frame_shape: (height, width) of the frame
+        padding: Extra padding around the box
+    
+    Returns:
+        (new_x1, new_y1, new_x2, new_y2): Square bounding box coordinates
+    """
+    frame_height, frame_width = frame_shape[:2]
+    
+    # Get original dimensions
+    width = x2 - x1
+    height = y2 - y1
+    
+    # Make it square by using the larger dimension
+    size = max(width, height) + padding * 2
+    
+    # Center the square on the original bounding box
+    center_x = (x1 + x2) // 2
+    center_y = (y1 + y2) // 2
+    
+    # Calculate square coordinates
+    half_size = size // 2
+    new_x1 = center_x - half_size
+    new_y1 = center_y - half_size
+    new_x2 = center_x + half_size
+    new_y2 = center_y + half_size
+    
+    # Ensure we stay within frame bounds
+    new_x1 = max(0, new_x1)
+    new_y1 = max(0, new_y1)
+    new_x2 = min(frame_width, new_x2)
+    new_y2 = min(frame_height, new_y2)
+    
+    # Make sure it's still square after boundary adjustment
+    actual_width = new_x2 - new_x1
+    actual_height = new_y2 - new_y1
+    final_size = min(actual_width, actual_height)
+    
+    # Re-center with the final size
+    new_x2 = new_x1 + final_size
+    new_y2 = new_y1 + final_size
+    
+    return int(new_x1), int(new_y1), int(new_x2), int(new_y2)
+
 def detect_gesture_in_person_box_using_utils(person_box, frame_source, gesture_type="wave", fps=30, duration_seconds=2):
     """
     Use WaveDetector or HandOverFaceDetector classes from utils to detect gestures
@@ -49,10 +142,34 @@ def detect_gesture_in_person_box_using_utils(person_box, frame_source, gesture_t
         # Apply rotation if needed (assume same rotation as main video)
         # Note: You might want to pass rotation as a parameter
         
-        # Extract person crop
-        person_crop = frame[y1:y2, x1:x2]
+        # Adjust bounding box if it has unreasonable aspect ratio
+        adj_x1, adj_y1, adj_x2, adj_y2 = adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame.shape)
+        
+        # Extract person crop using adjusted bounding box
+        person_crop = frame[adj_y1:adj_y2, adj_x1:adj_x2]
         if person_crop.size == 0:
             continue
+            
+        # Debug: Print dimensions to see what we're working with
+        if len(person_frames) == 0:  # Only print for first frame
+            print(f"  Original YOLO box: ({x1}, {y1}) to ({x2}, {y2})")
+            print(f"  Original dimensions: {x2-x1}w x {y2-y1}h")
+            print(f"  Adjusted box: ({adj_x1}, {adj_y1}) to ({adj_x2}, {adj_y2})")
+            print(f"  Adjusted dimensions: {adj_x2-adj_x1}w x {adj_y2-adj_y1}h")
+            print(f"  Person crop shape: {person_crop.shape}")
+            original_aspect = (x2-x1) / (y2-y1) if (y2-y1) > 0 else 0
+            adjusted_aspect = (adj_x2-adj_x1) / (adj_y2-adj_y1) if (adj_y2-adj_y1) > 0 else 0
+            print(f"  Aspect ratio: {original_aspect:.2f} -> {adjusted_aspect:.2f}")
+            print(f"  NOTE: MediaPipe window may appear stretched, but detection accuracy is unaffected!")
+            
+        # Keep original dimensions but resize to reasonable size for MediaPipe
+        # MediaPipe works better with larger images
+        if person_crop.shape[0] < 300 or person_crop.shape[1] < 200:
+            # Scale up small crops while maintaining aspect ratio
+            scale_factor = max(300 / person_crop.shape[0], 200 / person_crop.shape[1])
+            new_height = int(person_crop.shape[0] * scale_factor)
+            new_width = int(person_crop.shape[1] * scale_factor)
+            person_crop = cv2.resize(person_crop, (new_width, new_height))
             
         person_frames.append(person_crop.copy())
     
@@ -66,6 +183,7 @@ def detect_gesture_in_person_box_using_utils(person_box, frame_source, gesture_t
     temp_video_path = "temp_person_crop.avi"
     
     # Create a temporary video from the person frame sequence
+    # Use original bounding box dimensions
     height, width = person_frames[0].shape[:2]
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
@@ -79,13 +197,13 @@ def detect_gesture_in_person_box_using_utils(person_box, frame_source, gesture_t
     gesture_detected = False
     try:
         if gesture_type == "wave":
-            detector = WaveDetector(temp_video_path, fps, detection_confidence=0.5)
-            detected_frames = detector.detect_wave_timestamps(show_ui=True, frame_skip=5)  # Show UI to see skeleton
+            detector = WaveDetector(temp_video_path, fps, detection_confidence=0.4)  # Lower threshold
+            detected_frames = detector.detect_wave_timestamps(show_ui=True, frame_skip=3)  # Show UI to see skeleton
             gesture_detected = len(detected_frames) > 0
         
         elif gesture_type == "hand_over_face":
             detector = HandOverFaceDetector(temp_video_path, fps, detection_confidence=0.3)
-            detected_frames = detector.detect_hand_over_face_frames(show_ui=True, frame_skip=5)  # Show UI to see skeleton
+            detected_frames = detector.detect_hand_over_face_frames(show_ui=True, frame_skip=3)  # Show UI to see skeleton
             gesture_detected = len(detected_frames) > 0
             
     except Exception as e:
@@ -155,13 +273,21 @@ def main():
         elif rotation == 270:
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         
-        # Global processing: Only process every 30 frames (1 second at 30fps)
+        # Global processing: Only process every 60 frames (2 seconds at 30fps)
         if frame_count % global_frame_skip != 0:
             frame_count += 1
             continue
         
         # Step 1: YOLO person detection (runs every time we process)
         people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+        
+        # Only proceed with gesture detection if people are detected
+        if not people_detected:
+            print(f"Frame {frame_count}: No people detected by YOLO, skipping gesture detection")
+            frame_count += 1
+            continue
+        
+        print(f"Frame {frame_count}: YOLO detected {len(people_detected)} people - proceeding with gesture detection")
         
         # Step 2: For each detected person, immediately run gesture detection for 2 seconds
         current_gesture_people = []
