@@ -19,6 +19,8 @@ from utils import (
 # Configuration
 video_path = "C:\\Users\\Layne\\Desktop\\RECORDINGS[CONFI]\\GH010048.mp4"
 GESTURE_TYPE = "wave"  # Change to "hand_over_face" to test the other detector
+SAVE_OUTPUT = True  # Set to True to save the blurred video output
+OUTPUT_PATH = "blurred_output.mp4"  # Output video file name
 
 def adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame_shape, target_aspect_ratio=0.6):
     """
@@ -63,6 +65,38 @@ def adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame_shape, target_aspect_
         new_x1, new_x2 = x1, x2
     
     return int(new_x1), int(new_y1), int(new_x2), int(new_y2)
+
+def match_person_to_blur_list(current_bbox, blur_list, tolerance=150):
+    """
+    Match a current person bounding box to someone in the permanent blur list.
+    Uses center point distance to identify the same person across frames.
+    
+    Args:
+        current_bbox: (x1, y1, x2, y2) current person bounding box
+        blur_list: List of people who should be permanently blurred
+        tolerance: Maximum pixel distance to consider a match
+    
+    Returns:
+        True if this person should be blurred, False otherwise
+    """
+    if not blur_list:
+        return False
+        
+    current_center = ((current_bbox[0] + current_bbox[2]) // 2, 
+                     (current_bbox[1] + current_bbox[3]) // 2)
+    
+    for blur_person in blur_list:
+        blur_center = blur_person['center']
+        distance = ((current_center[0] - blur_center[0])**2 + 
+                   (current_center[1] - blur_center[1])**2)**0.5
+        
+        if distance < tolerance:
+            # Update the person's current position for future matching
+            blur_person['center'] = current_center
+            blur_person['bbox'] = current_bbox
+            return True
+    
+    return False
 
 def expand_to_square_box(x1, y1, x2, y2, frame_shape, padding=20):
     """
@@ -225,6 +259,8 @@ def main():
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     rotation = get_video_rotation(video_path)
     cap.release()
     
@@ -233,15 +269,29 @@ def main():
         fps = 30.0  # Default to 30 FPS if invalid
         print("Warning: Invalid FPS detected, defaulting to 30 FPS")
     
+    # Adjust dimensions for rotation
+    if rotation in [90, 270]:
+        frame_width, frame_height = frame_height, frame_width
+    
     print(f"Video Properties:")
     print(f"- FPS: {fps}")
     print(f"- Total Frames: {total_frames}")
+    print(f"- Dimensions: {frame_width}x{frame_height}")
     print(f"- Rotation: {rotation}°")
     print(f"- Testing Gesture Type: {GESTURE_TYPE}")
+    if SAVE_OUTPUT:
+        print(f"- Output will be saved to: {OUTPUT_PATH}")
     print("-" * 50)
     
     # Initialize MediaPipe face detection for blurring
     mp_face = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.5)
+    
+    # Initialize video writer for saving output (if enabled)
+    video_writer = None
+    if SAVE_OUTPUT:
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(OUTPUT_PATH, fourcc, fps, (frame_width, frame_height))
+        print(f"Video writer initialized: {OUTPUT_PATH}")
     
     # User interaction variables
     blur_enabled = False
@@ -259,6 +309,7 @@ def main():
     # Track which people have been processed to avoid re-processing
     processed_people = set()  # Store (frame_num, person_index) to avoid duplicates
     people_with_gestures = []  # Persistent list of people who have gestures detected
+    people_to_blur_permanently = []  # People who should be blurred throughout the entire video
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -275,6 +326,9 @@ def main():
         
         # Global processing: Only process every 60 frames (2 seconds at 30fps)
         if frame_count % global_frame_skip != 0:
+            # Even when not processing gestures, save the frame to output video
+            if SAVE_OUTPUT and video_writer is not None:
+                video_writer.write(frame)
             frame_count += 1
             continue
         
@@ -284,6 +338,9 @@ def main():
         # Only proceed with gesture detection if people are detected
         if not people_detected:
             print(f"Frame {frame_count}: No people detected by YOLO, skipping gesture detection")
+            # Save frame to output video even when no people detected
+            if SAVE_OUTPUT and video_writer is not None:
+                video_writer.write(frame)
             frame_count += 1
             continue
         
@@ -315,6 +372,14 @@ def main():
                 current_gesture_people.append((x1, y1, x2, y2))
                 gesture_count += 1
                 
+                # Add this person to the permanent blur list
+                person_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+                people_to_blur_permanently.append({
+                    'bbox': (x1, y1, x2, y2),
+                    'center': person_center,
+                    'first_detected_frame': frame_count
+                })
+                
                 # Ask user for blur confirmation on first gesture detection
                 if not blur_enabled and gesture_detected_frame is None:
                     root = tk.Tk()
@@ -340,9 +405,13 @@ def main():
             person_box = (x1, y1, x2, y2)
             gesture_detected = person_box in gesture_detected_people
             person_id = (frame_count // global_frame_skip, i)
+            should_be_blurred = match_person_to_blur_list(person_box, people_to_blur_permanently)
             
             # Draw bounding boxes - different colors for different states
-            if gesture_detected:
+            if should_be_blurred:
+                box_color = (255, 0, 255)  # Magenta for permanently blurred people
+                label = f"Person {i+1} - PERMANENT BLUR"
+            elif gesture_detected:
                 box_color = (0, 0, 255)  # Red for gesture detected
                 label = f"Person {i+1} - {GESTURE_TYPE.upper()}!"
             elif person_id in processed_people:
@@ -356,49 +425,53 @@ def main():
             cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 1)
         
         # Step 3: Blur faces of people who gestured (if blurring is enabled)
-        if blur_enabled and people_with_gestures:
-            for x1, y1, x2, y2 in people_with_gestures:
-                # Extract person region for face detection and blurring
-                person_crop = frame[y1:y2, x1:x2]
-                if person_crop.size == 0:
-                    continue
-                
-                # Detect and blur face within this person's bounding box
-                person_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
-                face_result = mp_face.process(person_rgb)
-                
-                if face_result.detections:
-                    for detection in face_result.detections:
-                        box = detection.location_data.relative_bounding_box
-                        # Convert relative coordinates to absolute coordinates within person box
-                        fx = int(box.xmin * (x2 - x1)) + x1
-                        fy = int(box.ymin * (y2 - y1)) + y1
-                        fw = int(box.width * (x2 - x1))
-                        fh = int(box.height * (y2 - y1))
-                        
-                        # Ensure coordinates are within frame bounds
-                        fx, fy = max(0, fx), max(0, fy)
-                        fw = min(fw, frame.shape[1] - fx)
-                        fh = min(fh, frame.shape[0] - fy)
-                        
-                        # Apply blur to face region
-                        if fw > 0 and fh > 0:
-                            face_roi = frame[fy:fy+fh, fx:fx+fw]
-                            blurred_face = cv2.GaussianBlur(face_roi, (55, 55), 0)
-                            frame[fy:fy+fh, fx:fx+fw] = blurred_face
+        if blur_enabled and people_to_blur_permanently:
+            for x1, y1, x2, y2 in people_detected:
+                # Check if this person should be blurred
+                if match_person_to_blur_list((x1, y1, x2, y2), people_to_blur_permanently):
+                    # Extract person region for face detection and blurring
+                    person_crop = frame[y1:y2, x1:x2]
+                    if person_crop.size == 0:
+                        continue
+                    
+                    # Detect and blur face within this person's bounding box
+                    person_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
+                    face_result = mp_face.process(person_rgb)
+                    
+                    if face_result.detections:
+                        for detection in face_result.detections:
+                            box = detection.location_data.relative_bounding_box
+                            # Convert relative coordinates to absolute coordinates within person box
+                            fx = int(box.xmin * (x2 - x1)) + x1
+                            fy = int(box.ymin * (y2 - y1)) + y1
+                            fw = int(box.width * (x2 - x1))
+                            fh = int(box.height * (y2 - y1))
                             
-                            # Draw face detection box (blue)
-                            cv2.rectangle(frame, (fx, fy), (fx+fw, fy+fh), (255, 0, 0), 1)
-                            cv2.putText(frame, "BLURRED", (fx, fy-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+                            # Ensure coordinates are within frame bounds
+                            fx, fy = max(0, fx), max(0, fy)
+                            fw = min(fw, frame.shape[1] - fx)
+                            fh = min(fh, frame.shape[0] - fy)
+                            
+                            # Apply blur to face region
+                            if fw > 0 and fh > 0:
+                                face_roi = frame[fy:fy+fh, fx:fx+fw]
+                                blurred_face = cv2.GaussianBlur(face_roi, (55, 55), 0)
+                                frame[fy:fy+fh, fx:fx+fw] = blurred_face
+                                
+                                # Draw face detection box (blue)
+                                cv2.rectangle(frame, (fx, fy), (fx+fw, fy+fh), (255, 0, 0), 1)
+                                cv2.putText(frame, "BLURRED", (fx, fy-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
         
         # Display frame information
         timestamp = frame_count * frame_time
+        blurred_people_count = len(people_to_blur_permanently)
         info_text = [
             f"Frame: {frame_count}/{total_frames}",
             f"Time: {timestamp:.2f}s",
             f"Step 1 - People detected: {len(people_detected)}",
             f"Step 2 - Gestures detected: {len(people_with_gestures)}",
             f"Step 3 - Blur enabled: {'YES' if blur_enabled else 'NO'}",
+            f"People to blur permanently: {blurred_people_count}",
             f"Testing: {GESTURE_TYPE.replace('_', ' ').title()}"
         ]
         
@@ -409,13 +482,18 @@ def main():
             cv2.putText(frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
         
         # Add legend
-        legend_y = frame.shape[0] - 100
+        legend_y = frame.shape[0] - 120
         cv2.putText(frame, "Legend:", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         cv2.putText(frame, "Legend:", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-        cv2.putText(frame, "Yellow: Waiting to process", (10, legend_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-        cv2.putText(frame, "Green: Processed, no gesture", (10, legend_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-        cv2.putText(frame, "Red: Gesture detected", (10, legend_y + 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-        cv2.putText(frame, "Blue: Face blurred", (10, legend_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+        cv2.putText(frame, "Green box: Person detected", (10, legend_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        cv2.putText(frame, "Red box: Gesture detected", (10, legend_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+        cv2.putText(frame, "Magenta box: Permanent blur target", (10, legend_y + 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+        cv2.putText(frame, "Blue blur: Face blurring active", (10, legend_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+        cv2.putText(frame, f"Testing: {GESTURE_TYPE.replace('_', ' ').title()}", (10, legend_y + 75), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        # Save frame to output video
+        if SAVE_OUTPUT and video_writer is not None:
+            video_writer.write(frame)
         
         # Display the frame
         cv2.imshow("YOLO → MediaPipe Gesture → Face Blur Pipeline", frame)
@@ -434,6 +512,9 @@ def main():
     
     # Cleanup
     cap.release()
+    if SAVE_OUTPUT and video_writer is not None:
+        video_writer.release()
+        print(f"\nOutput video saved to: {OUTPUT_PATH}")
     cv2.destroyAllWindows()
     mp_face.close()
     close_global_mediapipe()
@@ -454,10 +535,17 @@ if __name__ == "__main__":
     print("Step 2: If person detected → Use gesture detector within bounding box")
     print("Step 3: If gesture detected → Blur that person's face")
     print()
+    print("Features:")
+    print(f"- Video output saving: {'ENABLED' if SAVE_OUTPUT else 'DISABLED'}")
+    if SAVE_OUTPUT:
+        print(f"- Output file: {OUTPUT_PATH}")
+    print("- Selective person tracking and blurring")
+    print("- Real-time gesture detection with MediaPipe")
+    print()
     print("Controls:")
     print("- Press 'q' to quit")
     print("- Press 'r' to reset blur state")
-    print("- Color coding: Green=Person, Red=Gesture detected, Blue=Face blurred")
+    print("- Color coding: Green=Person, Red=Gesture detected, Magenta=Permanent blur, Blue=Face blurred")
     print("=" * 70)
     
     try:
