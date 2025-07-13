@@ -6,7 +6,10 @@ from utilities import (
     generate_thumbnails,
     blur_faces_of_person,
     HandOverFaceDetector,
-    match_person_id
+    match_person_id,
+    detect_multiple_people_yolov8,
+    detect_gesture_in_person_box,
+    match_person_to_blur_list
 )
 
 class EditorCore:
@@ -83,59 +86,75 @@ class EditorCore:
 
     def detect_and_blur_hand_segments(self, progress_callback=None):
         """
-        Uses WaveDetector and HandOverFaceDetector to find gestures.
-        Stores only first occurrence per person per gesture type.
-        Returns list of (person_id, gesture_type, frame_idx).
+        First pass: Only detect gestures and identify people.
+        Returns list of (person_id, gesture_type, frame_idx, bbox).
         """
         if not self.video_path:
             return []
 
-        # Initialize detectors
-        wave_detector = WaveDetector(self.video_path, self.fps)
-        wave_data = wave_detector.detect_wave_timestamps(show_ui=False, frame_skip=3)
-
-        cover_detector = HandOverFaceDetector(self.video_path, self.fps)
-        cover_data = cover_detector.detect_hand_over_face_frames(show_ui=False, frame_skip=3)
-
-        # Existing persons dict: person_id -> landmarks
-        existing_people = {}
-
-        # Final data: {person_id: {gesture_type: (frame_idx, landmarks)}}
-        person_gestures = {}
-
-        def process_gesture(data, gesture_type):
-            for frame_idx, landmarks in data:
-                person_id = match_person_id(existing_people, landmarks)
-                if person_id not in person_gestures:
-                    person_gestures[person_id] = {}
-                if gesture_type not in person_gestures[person_id]:
-                    person_gestures[person_id][gesture_type] = (frame_idx, landmarks)
-
-        # Process both gestures
-        process_gesture(wave_data, "wave")
-        process_gesture(cover_data, "cover_face")
-
-        # Flatten results
+        print("PASS 1: Analyzing video for gesture detection...")
+        
         gesture_timestamps = []
+        frame_count = 0
+        global_frame_skip = 60  # Process every 60 frames during detection
+        detected_person_gestures = {}  # key: person_id, value: set of detected gestures
+        
         cap = cv2.VideoCapture(self.video_path)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        while cap.isOpened():
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        for person_id, gestures in person_gestures.items():
-            for gesture_type, (frame_idx, landmarks) in gestures.items():
-                gesture_timestamps.append((person_id, gesture_type, frame_idx, landmarks))
+            # Apply rotation if needed
+            if self.rotation_angle == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif self.rotation_angle == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif self.rotation_angle == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-                # Blur this person at their first gesture timestamp
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame = cap.read()
-                if not ret:
-                    continue
+            # Only process every 60 frames for gesture detection
+            if frame_count % global_frame_skip != 0:
+                frame_count += 1
+                continue
+            
+            # Detect people
+            people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+            
+            if not people_detected:
+                frame_count += global_frame_skip
+                continue
 
-                blurred = blur_faces_of_person(frame, [landmarks])
-                self.blurred_frames.add(frame_idx)
-                self.blurred_cache[frame_idx] = blurred
+            print(f"Frame {frame_count}: Analyzing {len(people_detected)} people")
+            
+            # Check each person for gestures
+            for person_id, bbox in enumerate(people_detected, 1):
+                detected_gestures = detected_person_gestures.get(person_id, set())
 
-                if progress_callback:
-                    progress_callback(frame_idx + 1)
+                if 'wave' not in detected_gestures:
+                    wave_gesture_frame = detect_gesture_in_person_box(
+                        bbox, cap, gesture_type="wave", fps=self.fps, duration_seconds=2
+                    )
+                    if wave_gesture_frame is not None:
+                        actual_frame = frame_count + wave_gesture_frame
+                        gesture_timestamps.append((person_id, 'wave', actual_frame, bbox))
+
+                if 'cover_face' not in detected_gestures:
+                    cover_gesture_frame = detect_gesture_in_person_box(
+                        bbox, cap, gesture_type="hand_over_face", fps=self.fps, duration_seconds=2
+                    )
+                    if cover_gesture_frame:
+                        actual_frame = frame_count + cover_gesture_frame
+                        gesture_timestamps.append((person_id, 'cover face', actual_frame, bbox))
+
+                detected_person_gestures[person_id] = detected_gestures
+
+            if progress_callback:
+                progress_callback(frame_count)
+
+            frame_count += global_frame_skip
 
         cap.release()
         return gesture_timestamps
@@ -184,3 +203,59 @@ class EditorCore:
         in_cap.release()
         out.release()
         return True
+    
+    def blur_person_in_video(self, person_bbox, start_frame, progress_callback=None):
+        """
+        Blur the target person's face from their first gesture-detected frame (start_frame) onward.
+        Tracks the person continuously even if not detected every frame.
+        """
+        if self.cap is None:
+            return []
+
+        blurred_frames = []
+        frame_idx = start_frame
+        yolo_skip_frames = 30
+        last_detected_people = []
+        last_matched_bbox = person_bbox  # Start tracking from this bbox
+
+        cap = cv2.VideoCapture(self.video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        while frame_idx < total_frames:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Apply rotation if needed
+            if self.rotation_angle == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif self.rotation_angle == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif self.rotation_angle == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+            # Refresh detection every N frames
+            if frame_idx % yolo_skip_frames == 0:
+                last_detected_people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+
+            # Attempt to match current bbox
+            matched_bbox = match_person_to_blur_list(last_matched_bbox, last_detected_people)
+            if matched_bbox:
+                last_matched_bbox = matched_bbox  # Update tracking
+            else:
+                matched_bbox = last_matched_bbox  # Fallback to last known bbox
+
+            if matched_bbox:
+                frame = blur_faces_of_person(frame, matched_bbox)
+                self.blurred_cache[frame_idx] = frame
+                blurred_frames.append(frame_idx)
+                self.blurred_frames.add(frame_idx)
+
+            if progress_callback:
+                progress_callback(frame_idx)
+
+            frame_idx += 1
+
+        cap.release()
+        return blurred_frames

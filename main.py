@@ -409,7 +409,7 @@ class MainWindow(QMainWindow):
     def _on_timer_tick(self):
         """
         Called every ~1000/fps ms while playing. Grab the next frame from cv2.VideoCapture,
-        overlay blur if needed, and display it in the UI.
+        and display it in the UI. Only show blurred version if it exists in cache.
         """
         ret, frame = self.core.cap.read()
         if not ret:
@@ -419,14 +419,14 @@ class MainWindow(QMainWindow):
 
         pos = int(self.core.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
 
-        # Don't skip frames during playback: just display the current frame
+        # Use cached blurred frame if available, otherwise show original frame
         img = self.core.blurred_cache.get(pos, frame)
         self.editor_panel.display_frame(img, pos)
 
-        # Apply blurring and detection only for the current frame
-        frame = detect_and_blur_multiple_people(frame, frame_count=pos)  # Process every frame (frame_skip=1)
-        img = self.core.blurred_cache.get(pos, frame)
-        self.editor_panel.display_frame(img, pos)
+        # Remove these lines that were causing automatic blurring:
+        # frame = detect_and_blur_multiple_people(frame, frame_count=pos)
+        # img = self.core.blurred_cache.get(pos, frame)
+        # self.editor_panel.display_frame(img, pos)
 
     def _on_detect_requested(self):
         """
@@ -536,119 +536,81 @@ class MainWindow(QMainWindow):
             self.elapsed_label.setText(f"{mm:02d}:{ss:02d}")
     
     def _on_gesture_detection_finished(self, segment_starts):
+        """Handle completion of gesture detection"""
         self.progress.close()
+        self._detect_timer.stop()
 
-        # ─── Populate the gesture lists with person_id and gesture_type ─────
+        # Populate gesture list with detected gestures
         self.editor_panel.gesture_list.clear()
-        for person_id, gesture_type, frame_idx, landmarks in segment_starts:
+        for person_id, gesture_type, frame_idx, bbox in segment_starts:
             t = frame_idx / self.core.fps
             mm = int(t // 60)
             ss = int(t % 60)
             msec = int((t - int(t)) * 1000)
             time_str = f"{mm:02}:{ss:02}.{msec:03}"
 
-            if gesture_type == "wave":
-                emoji = "👋"
-            elif gesture_type == "cover_face":
-                emoji = "🫣"
-            else:
-                emoji = "❓"
-
+            emoji = "👋" if gesture_type == "wave" else "🫣"
             item_str = f"{emoji} Person {person_id} {gesture_type.capitalize()} - ({time_str})"
             item = QListWidgetItem(item_str)
-            item.setData(Qt.UserRole, (frame_idx, landmarks))
+            item.setData(Qt.UserRole, (frame_idx, bbox))  # Store frame_idx and bbox
             self.editor_panel.gesture_list.addItem(item)
 
-        cur = self.editor_panel.current_frame_idx
-        if cur in self.core.blurred_cache:
-            img = self.core.blurred_cache[cur]
-            self.editor_panel.display_frame(img, cur)
-
+        # Enable blur button if gestures were found
         if segment_starts:
             self.editor_panel.blur_button.setEnabled(True)
+            
+        print(f"\nDetection complete: Found {len(segment_starts)} gestures")
 
 
 
     def _on_blur_requested(self, frame_idx: int):
         """
-        User clicked “Blur Frame” on a selected gesture item.
-        Blur that person's face throughout the entire video with progress bar.
-        Jump to the selected frame after completion.
+        User clicked "Blur Person" for a selected gesture timestamp.
         """
-        # Retrieve selected gesture item and its stored data
         selected_items = self.editor_panel.gesture_list.selectedItems()
         if not selected_items:
             return
 
         item = selected_items[0]
-        frame_idx, target_landmarks = item.data(Qt.UserRole)
+        frame_idx, bbox = item.data(Qt.UserRole)
 
-        # ─── Create progress dialog ───────────────────────────────────────
-        total = self.core.total_frames
-        progress = QProgressDialog("Blurring person in all frames… Please wait…", None, 0, total, self.editor_panel)
+        # Create progress dialog
+        progress = QProgressDialog("Blurring person in video... Please wait...", None, 0, self.core.total_frames, self)
         progress.setWindowTitle("Processing")
         progress.setWindowModality(Qt.ApplicationModal)
         progress.setCancelButton(None)
         progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setValue(0)
-        progress.setMinimumSize(300, 100)
-        progress.setWindowFlags(
-            progress.windowFlags()
-            & ~Qt.WindowContextHelpButtonHint
-        )
         progress.setStyleSheet("""
             QProgressDialog {
-                background-color: #2b2b2b;
-                color: #e0e0e0;
+                background: #2D3748;
+                color: #E2E8F0;
                 border-radius: 8px;
             }
             QProgressBar {
-                border: 1px solid #555555;
-                border-radius: 5px;
+                border: 1px solid #4A5568;
+                border-radius: 4px;
                 text-align: center;
-                background-color: #3c3c3c;
-                color: #ffffff;
             }
             QProgressBar::chunk {
-                background-color: #6cace4;
-                width: 20px;
-            }
-            QLabel {
-                color: #e0e0e0;
+                background: #4FD1C7;
             }
         """)
-
         progress.show()
-        QApplication.processEvents()
 
-        # Loop through frames and blur the selected person's face
-        cap = cv2.VideoCapture(self.core.video_path)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # Blur the person throughout the video
+        blurred_frames = self.core.blur_person_in_video(
+            bbox, 
+            frame_idx,
+            progress_callback=progress.setValue
+        )
 
-        for i in range(total):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-            ret, frame = cap.read()
-            if not ret:
-                continue
+        # Update the blurred frames set
+        self.core.blurred_frames.update(blurred_frames)
 
-            # Apply blurring to the selected person
-            blurred = blur_faces_of_person(frame, target_landmarks_list=[target_landmarks])
-            self.core.blurred_frames.add(i)
-            self.core.blurred_cache[i] = blurred
-
-            progress.setValue(i + 1)
-            QApplication.processEvents()
-
-        cap.release()
         progress.close()
 
-        # Display the selected frame after blurring
-        if frame_idx in self.core.blurred_cache:
-            img = self.core.blurred_cache[frame_idx]
-        else:
-            img = self.core.get_frame(frame_idx)
+        # Show the current frame
+        img = self.core.get_frame(frame_idx)
         self.editor_panel.display_frame(img, frame_idx)
 
 
