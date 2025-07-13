@@ -120,7 +120,8 @@ class WaveDetector:
             hand_results = self.hands.process(frame_rgb)
             pose_results = self.pose.process(frame_rgb)
 
-            people = detect_multiple_people_yolov8(frame)
+            # Removed unnecessary YOLO call - we already have person crop
+            # people = detect_multiple_people_yolov8(frame)
 
             if hand_results.multi_hand_landmarks and pose_results.pose_landmarks:
                 for hand_landmarks in hand_results.multi_hand_landmarks:

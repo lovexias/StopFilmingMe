@@ -129,12 +129,12 @@ def detect_gesture_in_person_box(person_box, frame_source, gesture_type="wave", 
     try:
         if gesture_type == "wave":
             detector = WaveDetector(temp_video_path, fps, detection_confidence=0.4)
-            detected_frames = detector.detect_wave_timestamps(show_ui=False, frame_skip=3)  # No UI
+            detected_frames = detector.detect_wave_timestamps(show_ui=True, frame_skip=3)  # Show UI
             gesture_detected = len(detected_frames) > 0
         
         elif gesture_type == "hand_over_face":
             detector = HandOverFaceDetector(temp_video_path, fps, detection_confidence=0.3)
-            detected_frames = detector.detect_hand_over_face_frames(show_ui=False, frame_skip=3)  # No UI
+            detected_frames = detector.detect_hand_over_face_frames(show_ui=True, frame_skip=3)  # Show UI
             gesture_detected = len(detected_frames) > 0
             
     except Exception as e:
@@ -154,6 +154,7 @@ def detect_gesture_in_person_box(person_box, frame_source, gesture_type="wave", 
 def first_pass_detect_gestures(video_path, fps, rotation):
     """
     First pass: Identify which people should be permanently blurred throughout the video.
+    Only starts analyzing after YOLO first detects a person.
     Returns a list of people who should be blurred.
     """
     print("PASS 1: Analyzing video for gesture detection...")
@@ -164,7 +165,12 @@ def first_pass_detect_gestures(video_path, fps, rotation):
     processed_people = set()
     people_to_blur_permanently = []
     
+    # Flag to track if we've detected the first person
+    first_person_detected = False
+    
     while cap.isOpened():
+        # Skip directly to the next frame we want to process
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
         ret, frame = cap.read()
         if not ret:
             break
@@ -177,21 +183,78 @@ def first_pass_detect_gestures(video_path, fps, rotation):
         elif rotation == 270:
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         
-        # Only process every 60 frames
-        if frame_count % global_frame_skip != 0:
-            frame_count += 1
-            continue
-        
-        # Detect people
+        # Always check for people to see if we should start analyzing
         people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
         
+        # If we haven't detected the first person yet, keep looking
+        if not first_person_detected:
+            if people_detected:
+                first_person_detected = True
+                print(f"First person detected at frame {frame_count}. Starting gesture analysis...")
+            else:
+                frame_count += global_frame_skip  # Jump to next frame
+                continue
+        
+        # Create a copy for UI display
+        display_frame = frame.copy()
+        
+        # Draw all detected people
+        for i, (x1, y1, x2, y2) in enumerate(people_detected):
+            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)  # Yellow boxes
+            cv2.putText(display_frame, f"Person {i+1}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        
+        # Draw already processed people in different color
+        for blur_person in people_to_blur_permanently:
+            bbox = blur_person['bbox']
+            cv2.rectangle(display_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 0, 255), 3)  # Magenta for permanent blur
+            cv2.putText(display_frame, "WILL BE BLURRED", (bbox[0], bbox[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+        
+        # Add status text
+        status_texts = [
+            f"PASS 1: Gesture Detection Analysis",
+            f"Frame: {frame_count}",
+            f"First person detected: {'YES' if first_person_detected else 'NO'}",
+            f"People detected: {len(people_detected)}",
+            f"People to blur: {len(people_to_blur_permanently)}",
+            f"Gesture type: {GESTURE_TYPE.replace('_', ' ').title()}"
+        ]
+        
+        for i, text in enumerate(status_texts):
+            y_pos = 30 + i * 25
+            cv2.putText(display_frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(display_frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+        
+        # Add legend
+        legend_y = display_frame.shape[0] - 80
+        cv2.putText(display_frame, "Legend:", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        cv2.putText(display_frame, "Legend:", (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        cv2.putText(display_frame, "Yellow: Person detected", (10, legend_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+        cv2.putText(display_frame, "Magenta: Will be blurred", (10, legend_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+        cv2.putText(display_frame, "Press 'q' to quit, 's' to skip UI", (10, legend_y + 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        # Show the frame
+        cv2.imshow("Pass 1: Gesture Detection Analysis", display_frame)
+        
+        # Check for user input
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            print("User quit during analysis")
+            cap.release()
+            cv2.destroyAllWindows()
+            return people_to_blur_permanently
+        elif key == ord('s'):
+            print("Skipping UI for faster processing...")
+            cv2.destroyAllWindows()
+            break
+        
+        # Only run gesture analysis if people are detected (we're already on analysis frames)
         if not people_detected:
-            frame_count += 1
+            frame_count += global_frame_skip  # Jump to next frame
             continue
         
         print(f"Frame {frame_count}: Analyzing {len(people_detected)} people for gestures...")
         
-        # Check each person for gestures
+        # Check each person for gestures (no more YOLO calls needed here)
         for i, (x1, y1, x2, y2) in enumerate(people_detected):
             person_box = (x1, y1, x2, y2)
             person_id = (frame_count // global_frame_skip, i)
@@ -201,7 +264,14 @@ def first_pass_detect_gestures(video_path, fps, rotation):
             
             print(f"  Checking person {i+1} for {GESTURE_TYPE}...")
             
-            # Run gesture detection
+            # Highlight the person being analyzed
+            analysis_frame = display_frame.copy()
+            cv2.rectangle(analysis_frame, (x1, y1), (x2, y2), (0, 0, 255), 4)  # Red border for current analysis
+            cv2.putText(analysis_frame, f"ANALYZING PERSON {i+1}...", (x1, y1-30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.imshow("Pass 1: Gesture Detection Analysis", analysis_frame)
+            cv2.waitKey(100)  # Brief pause to show which person is being analyzed
+            
+            # Run gesture detection (uses MediaPipe only, no YOLO)
             gesture_detected = detect_gesture_in_person_box(
                 person_box, cap, GESTURE_TYPE, fps, duration_seconds=2
             )
@@ -216,12 +286,20 @@ def first_pass_detect_gestures(video_path, fps, rotation):
                     'first_detected_frame': frame_count
                 })
                 print(f"  ✓ {GESTURE_TYPE.replace('_', ' ').title()} detected! Person will be blurred.")
+                
+                # Show success feedback
+                success_frame = display_frame.copy()
+                cv2.rectangle(success_frame, (x1, y1), (x2, y2), (0, 255, 0), 4)  # Green border for success
+                cv2.putText(success_frame, f"GESTURE DETECTED!", (x1, y1-30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.imshow("Pass 1: Gesture Detection Analysis", success_frame)
+                cv2.waitKey(1000)  # Show success for 1 second
             else:
                 print(f"  ✗ No {GESTURE_TYPE.replace('_', ' ').lower()} detected.")
         
-        frame_count += 1
+        frame_count += global_frame_skip  # Jump to next frame
     
     cap.release()
+    cv2.destroyAllWindows()
     
     print(f"\nPASS 1 COMPLETE:")
     print(f"- Processed {frame_count} frames")
@@ -232,7 +310,7 @@ def first_pass_detect_gestures(video_path, fps, rotation):
 def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, frame_width, frame_height):
     """
     Second pass: Create clean output video with only the necessary face blurring.
-    No detection boxes, status text, or UI elements.
+    Optimized: Run YOLO every 30 frames, use last detection for intermediate frames.
     """
     print("\nPASS 2: Creating clean blurred video...")
     
@@ -247,6 +325,10 @@ def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, fr
     frame_count = 0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
+    # Optimization: Run YOLO every 30 frames, use last detection for others
+    yolo_skip_frames = 30  # Run YOLO every 30 frames (1 second at 30fps)
+    last_people_detected = []
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -260,8 +342,15 @@ def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, fr
         elif rotation == 270:
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         
-        # Detect people in current frame
-        people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+        # Run YOLO every 30 frames, otherwise use last detection
+        if frame_count % yolo_skip_frames == 0:
+            people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+            last_people_detected = people_detected
+            if frame_count % 300 == 0:  # Progress update every 10 seconds
+                print(f"  YOLO detection update at frame {frame_count} - Found {len(people_detected)} people")
+        else:
+            # Use last YOLO detection for intermediate frames
+            people_detected = last_people_detected
         
         # Blur faces of people who should be permanently blurred
         if people_to_blur and people_detected:
@@ -303,7 +392,8 @@ def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, fr
         # Progress indicator
         if frame_count % 100 == 0:
             progress = (frame_count / total_frames) * 100
-            print(f"  Progress: {progress:.1f}% ({frame_count}/{total_frames} frames)")
+            yolo_calls = (frame_count // yolo_skip_frames) + 1
+            print(f"  Progress: {progress:.1f}% ({frame_count}/{total_frames} frames) | YOLO calls: {yolo_calls}")
         
         frame_count += 1
     
@@ -312,8 +402,11 @@ def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, fr
     video_writer.release()
     mp_face.close()
     
+    total_yolo_calls = (frame_count // yolo_skip_frames) + 1
     print(f"\nPASS 2 COMPLETE:")
     print(f"- Processed {frame_count} frames")
+    print(f"- YOLO calls: {total_yolo_calls} (vs {frame_count} without optimization)")
+    print(f"- Performance improvement: {((frame_count - total_yolo_calls) / frame_count * 100):.1f}% fewer YOLO calls")
     print(f"- Clean video saved to: {OUTPUT_PATH}")
 
 def main():
