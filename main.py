@@ -25,7 +25,7 @@ from view import EditorPanel
 from model import EditorCore
 from utilities import blur_faces_of_person
 from utilities import detect_and_blur_multiple_people
-from utilities import detect_multiple_skeletons_yolov8
+from utilities import detect_multiple_people_yolov8
 from utilities import match_person_id
 
 class GestureDetectWorker(QThread):
