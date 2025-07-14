@@ -206,17 +206,16 @@ class EditorCore:
     
     def blur_person_in_video(self, person_bbox, start_frame, progress_callback=None):
         """
-        Blur the target person's face from their first gesture-detected frame (start_frame) onward.
-        Tracks the person continuously even if not detected every frame.
+        Blur the target person's face across the entire video by tracking from frame 0.
         """
         if self.cap is None:
             return []
 
         blurred_frames = []
-        frame_idx = start_frame
-        yolo_skip_frames = 30
+        frame_idx = 0  # always start from frame 0
+        yolo_skip_frames = 10
         last_detected_people = []
-        last_matched_bbox = person_bbox  # Start tracking from this bbox
+        last_matched_bbox = person_bbox
 
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -235,22 +234,30 @@ class EditorCore:
             elif self.rotation_angle == 270:
                 frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-            # Refresh detection every N frames
+            # Refresh YOLO detections
             if frame_idx % yolo_skip_frames == 0:
                 last_detected_people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
 
-            # Attempt to match current bbox
-            matched_bbox = match_person_to_blur_list(last_matched_bbox, last_detected_people)
-            if matched_bbox:
-                last_matched_bbox = matched_bbox  # Update tracking
-            else:
-                matched_bbox = last_matched_bbox  # Fallback to last known bbox
-
-            if matched_bbox:
-                frame = blur_faces_of_person(frame, matched_bbox)
-                self.blurred_cache[frame_idx] = frame
-                blurred_frames.append(frame_idx)
+                # Try to find matching person
+                for detected_bbox in last_detected_people:
+                    if match_person_to_blur_list(last_matched_bbox, [detected_bbox]):
+                        last_matched_bbox = detected_bbox
+                        break
+            if last_matched_bbox:
+                # Start with existing blurred frame if available, else the current frame
+                base_frame = self.blurred_cache.get(frame_idx, frame)
+                
+                # Apply blur on the current person
+                blurred_frame = blur_faces_of_person(base_frame, last_matched_bbox)
+                
+                # Update the cache
+                self.blurred_cache[frame_idx] = blurred_frame
                 self.blurred_frames.add(frame_idx)
+                blurred_frames.append(frame_idx)
+
+            else:
+                # Cache the original frame if no person matched
+                self.blurred_cache[frame_idx] = frame
 
             if progress_callback:
                 progress_callback(frame_idx)

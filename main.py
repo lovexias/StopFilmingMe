@@ -600,7 +600,7 @@ class MainWindow(QMainWindow):
         # Blur the person throughout the video
         blurred_frames = self.core.blur_person_in_video(
             bbox, 
-            frame_idx,
+            0,
             progress_callback=progress.setValue
         )
 
@@ -612,6 +612,8 @@ class MainWindow(QMainWindow):
         # Show the current frame
         img = self.core.get_frame(frame_idx)
         self.editor_panel.display_frame(img, frame_idx)
+        self.editor_panel.current_frame_idx = frame_idx  # Sync slider and current frame index
+
 
 
     def _on_thumbnail_clicked(self, frame_idx: int):
