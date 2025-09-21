@@ -4,6 +4,8 @@ import json
 import numpy as np
 import mediapipe as mp
 from ultralytics import YOLO
+DEBUG_TRACKING = True
+next_person_id = 1  # global counter
 
 # Initialize YOLOv8 model globally (adjust path as needed)
 yolo_model = YOLO('yolov8m.pt')  # Use regular detection model for person detection
@@ -14,6 +16,27 @@ mp_face_global = mp.solutions.face_detection.FaceDetection(min_detection_confide
 mp_pose_global = mp.solutions.pose.Pose()
 
 # ──────────────────────────────────────────────────────────────
+# ORB feature extractor and matcher
+orb = cv2.ORB_create(nfeatures=500)
+bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+def compute_orb_features(frame, bbox):
+    """Extract ORB descriptors from a person crop."""
+    x1, y1, x2, y2 = bbox
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    _, descriptors = orb.detectAndCompute(gray, None)
+    return descriptors
+
+def match_orb_features(desc1, desc2, match_threshold=15):
+    """Check if two descriptor sets are similar enough."""
+    if desc1 is None or desc2 is None:
+        return False
+    matches = bf.match(desc1, desc2)
+    good_matches = [m for m in matches if m.distance < 60]
+    return len(good_matches) >= match_threshold
 
 def detect_multiple_people_yolov8(frame, conf_threshold=0.15):
     """
@@ -372,32 +395,99 @@ def close_global_mediapipe():
     mp_face_global.close()
     mp_pose_global.close()
 
-def match_person_to_blur_list(current_bbox, blur_list, tolerance=150):
+def match_person_to_blur_list(current_bbox, blur_list, frame, tolerance=150):
     """
-    Match current_bbox to the closest person in blur_list.
-    Returns the matching bbox if found, None otherwise.
+    Hybrid tracker with person IDs and debug drawing.
+    - Green = new YOLO detection (new ID)
+    - Blue  = matched with IoU + distance
+    - Red   = matched with ORB fallback
+    Returns the matched person dict (with person_id).
     """
-    if not blur_list:
-        return None
-        
-    current_center = ((current_bbox[0] + current_bbox[2]) // 2, 
-                     (current_bbox[1] + current_bbox[3]) // 2)
+    global next_person_id
+
+    cx1, cy1, cx2, cy2 = current_bbox
+    current_center = ((cx1 + cx2) // 2, (cy1 + cy2) // 2)
+    current_area = (cx2 - cx1) * (cy2 - cy1)
+    curr_desc = compute_orb_features(frame, current_bbox)
+
+    best_match = None
+    best_score = float("inf")
+    match_mode = "new"
+
+    for blur_person in blur_list:
+        bx1, by1, bx2, by2 = blur_person["bbox"]
+        blur_center = blur_person["center"]
+        blur_area = (bx2 - bx1) * (by2 - by1)
+
+        # Distance
+        dist = float(((current_center[0] - blur_center[0])**2 +
+                (current_center[1] - blur_center[1])**2) ** 0.5)
+
+        # IoU
+        inter_x1 = max(cx1, bx1)
+        inter_y1 = max(cy1, by1)
+        inter_x2 = min(cx2, bx2)
+        inter_y2 = min(cy2, by2)
+        inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+        union_area = current_area + blur_area - inter_area
+        iou = inter_area / union_area if union_area > 0 else 0
+
+        # ORB
+        prev_desc = blur_person.get("orb")
+        orb_similar = match_orb_features(curr_desc, prev_desc)
+
+        # Score
+        score = float(dist - (iou * 200))
+        if orb_similar:
+            score *= 0.5
+            mode = "orb"
+        else:
+            mode = "iou"
+
+        if score < best_score and dist < tolerance:
+            best_score = score
+            best_match = blur_person
+            match_mode = mode
     
-    closest_match = None
-    min_distance = float('inf')
-    
-    for person_bbox in blur_list:
-        person_center = ((person_bbox[0] + person_bbox[2]) // 2,
-                        (person_bbox[1] + person_bbox[3]) // 2)
-        
-        distance = ((current_center[0] - person_center[0])**2 + 
-                   (current_center[1] - person_center[1])**2)**0.5
-        
-        if distance < tolerance and distance < min_distance:
-            min_distance = distance
-            closest_match = person_bbox
-    
-    return closest_match  # Returns None if no match found
+    if best_match:
+        if "id" not in best_match:  # ensure ID exists
+            best_match["id"] = next_person_id
+            next_person_id += 1
+        # Update existing person
+        best_match["center"] = current_center
+        best_match["bbox"] = current_bbox
+        best_match["orb"] = curr_desc
+        person_id = best_match["id"]
+
+        # Debug drawing
+        if DEBUG_TRACKING:
+            color = (255, 0, 0) if match_mode == "iou" else (0, 0, 255)  # blue=IoU, red=ORB
+            cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), color, 2)
+            cv2.putText(frame, f"ID {person_id} ({match_mode})",
+                        (cx1, cy1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, color, 2)
+
+        return best_match
+
+    # --- New person ---
+    new_person = {
+        "id": next_person_id,
+        "center": current_center,
+        "bbox": current_bbox,
+        "orb": curr_desc
+    }
+    blur_list.append(new_person)
+    person_id = next_person_id
+    next_person_id += 1
+
+    if DEBUG_TRACKING:
+        cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), (0, 255, 0), 2)  # green = new
+        cv2.putText(frame, f"ID {person_id} (new)",
+                    (cx1, cy1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 255, 0), 2)
+
+    return new_person
+
 
 def adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame_shape, target_aspect_ratio=0.6):
     """Adjust bounding box to have a more reasonable aspect ratio for person detection."""

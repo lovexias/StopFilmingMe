@@ -4,42 +4,24 @@
 import cv2
 import numpy as np
 import mediapipe as mp
-from utils import (
+from utilities import (
     WaveDetector,
     HandOverFaceDetector,
     detect_multiple_people_yolov8,
     get_video_rotation,
-    close_global_mediapipe
+    close_global_mediapipe,
+    match_person_to_blur_list as match_person_to_blur_list_util,
+    next_person_id
 )
 
 # Configuration
-video_path = "C:\\Users\\Layne\\Desktop\\RECORDINGS[CONFI]\\GH010048COPY.mp4"
-GESTURE_TYPE = "wave"  # Change to "hand_over_face" to test the other detector
+video_path = "D:\\01 KYLE\\School\\College\\4th Year\\3rd Term\\THS-ST2\\RECORDINGS[CONFI]\\RECORDINGS[CONFI]\\GH010070.mp4"
+GESTURE_TYPE = "hand_over_face"  # Change to "hand_over_face" to test the other detector
 OUTPUT_PATH = "clean_blurred_output.mp4"  # Clean output video file name
 
-def match_person_to_blur_list(current_bbox, blur_list, tolerance=150):
-    """
-    Match a current person bounding box to someone in the permanent blur list.
-    Uses center point distance to identify the same person across frames.
-    """
-    if not blur_list:
-        return False
-        
-    current_center = ((current_bbox[0] + current_bbox[2]) // 2, 
-                     (current_bbox[1] + current_bbox[3]) // 2)
-    
-    for blur_person in blur_list:
-        blur_center = blur_person['center']
-        distance = ((current_center[0] - blur_center[0])**2 + 
-                   (current_center[1] - blur_center[1])**2)**0.5
-        
-        if distance < tolerance:
-            # Update the person's current position for future matching
-            blur_person['center'] = current_center
-            blur_person['bbox'] = current_bbox
-            return True
-    
-    return False
+def match_person_to_blur_list(current_bbox, blur_list, frame, tolerance=150):
+    return match_person_to_blur_list_util(current_bbox, blur_list, frame, tolerance)
+
 
 def adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame_shape, target_aspect_ratio=0.6):
     """Adjust bounding box to have a more reasonable aspect ratio for person detection."""
@@ -93,11 +75,15 @@ def detect_gesture_in_person_box(person_box, frame_source, gesture_type="wave", 
             
         # Adjust bounding box aspect ratio
         adj_x1, adj_y1, adj_x2, adj_y2 = adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame.shape)
-        
+
+        # Debug: draw bbox on frame
+        debug_frame = frame.copy()
+        cv2.rectangle(debug_frame, (adj_x1, adj_y1), (adj_x2, adj_y2), (0, 255, 0), 2)
+        cv2.imshow("Crop Debug", debug_frame)
+        cv2.waitKey(1)
+
         # Extract person crop
         person_crop = frame[adj_y1:adj_y2, adj_x1:adj_x2]
-        if person_crop.size == 0:
-            continue
             
         # Scale up small crops for better MediaPipe processing
         if person_crop.shape[0] < 300 or person_crop.shape[1] < 200:
@@ -148,7 +134,11 @@ def detect_gesture_in_person_box(person_box, frame_source, gesture_type="wave", 
             os.remove(temp_video_path)
     except:
         pass
-    
+    try:
+        cv2.destroyWindow("Crop Debug")
+    except:
+        pass
+
     return gesture_detected
 
 def first_pass_detect_gestures(video_path, fps, rotation):
@@ -210,12 +200,17 @@ def first_pass_detect_gestures(video_path, fps, rotation):
             
             if gesture_detected:
                 person_center = ((x1 + x2) // 2, (y1 + y2) // 2)
+                global next_person_id  # allow incrementing the shared counter
                 people_to_blur_permanently.append({
+                    'id': next_person_id,
                     'bbox': (x1, y1, x2, y2),
                     'center': person_center,
-                    'first_detected_frame': frame_count
+                    'first_detected_frame': frame_count,
+                    'orb': None  # placeholder for ORB descriptors
                 })
                 print(f"  ✓ {GESTURE_TYPE.replace('_', ' ').title()} detected! Person will be blurred.")
+                next_person_id += 1
+
             else:
                 print(f"  ✗ No {GESTURE_TYPE.replace('_', ' ').lower()} detected.")
         
@@ -278,7 +273,8 @@ def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, fr
         if people_to_blur and people_detected:
             for x1, y1, x2, y2 in people_detected:
                 # Check if this person should be blurred
-                if match_person_to_blur_list((x1, y1, x2, y2), people_to_blur):
+                person = match_person_to_blur_list((x1, y1, x2, y2), people_to_blur, frame)
+                if person:
                     # Extract person region for face detection
                     person_crop = frame[y1:y2, x1:x2]
                     if person_crop.size == 0:
