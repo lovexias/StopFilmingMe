@@ -1,35 +1,35 @@
+# ---- SAFETY SWITCHES MUST BE SET BEFORE ANY OTHER IMPORTS ----
+import os, faulthandler, sys
+faulthandler.enable()
+
+# Safer TF Lite / OpenMP on Windows
+os.environ.setdefault("DISABLE_XNNPACK", "1")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
+os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import sys
 import webbrowser
-from PyQt5.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QAction,
-    QFileDialog,
-    QMessageBox,
-    QProgressDialog,
-    QListWidgetItem,
-    QLabel,
-    QProgressBar
-)
+import time
+import cv2
 
-from PyQt5.QtGui import QPixmap, QIcon, QPainter, QFont, QColor, QPen, QBrush
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QAction, QFileDialog, QMessageBox, QDialog
+)
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QElapsedTimer
+from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor, QPen, QBrush
 
 from view import KeyboardShortcutsDialog
-
-import cv2
-import time
-
-from view import EditorPanel
+from view import EditorPanel, ProcessingDialog, ExportDialog
 from model import EditorCore
-from utilities import blur_faces_of_person
-from utilities import detect_and_blur_multiple_people
-from utilities import detect_multiple_people_yolov8
-from utilities import match_person_id
+
+
+# ---------------- Workers ----------------
 
 class GestureDetectWorker(QThread):
-    finished = pyqtSignal(object)  # Will emit segment_starts
+    finished = pyqtSignal(object)  # segment_starts
 
     def __init__(self, core):
         super().__init__()
@@ -39,25 +39,40 @@ class GestureDetectWorker(QThread):
         segment_starts = self.core.detect_and_blur_hand_segments()
         self.finished.emit(segment_starts)
 
+
+class ExportWorker(QThread):
+    progress = pyqtSignal(int)         # 0–100
+    done = pyqtSignal(bool, str)       # ok, out_path
+
+    def __init__(self, core, out_path):
+        super().__init__()
+        self.core = core
+        self.out_path = out_path
+
+    def run(self):
+        def cb(pct):
+            self.progress.emit(int(pct))
+        ok = self.core.export_video(self.out_path, progress_cb=cb)
+        self.done.emit(bool(ok), self.out_path if ok else "")
+
+
+# ---------------- Main Window ----------------
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        #self.frame_skip = 60
         self.setWindowIcon(create_eye_icon())
         self.setWindowTitle("StopFilming - Privacy Protection Video Editor")
 
-        # ─── Model ────────────────────────────────────────────────────────
+        # Model
         self.core = EditorCore()
 
-        # ─── Single View: EditorPanel ─────────────────────────────────────
+        # View
         self.editor_panel = EditorPanel()
         self.setCentralWidget(self.editor_panel)
         self.setWindowTitle("StopFilming")
 
-
-        
-
-        # ─── Connect EditorPanel signals to controller slots ─────────────
+        # Wire signals
         self.editor_panel.importRequested.connect(self._on_import_requested)
         self.editor_panel.playToggled.connect(self._on_play_toggled)
         self.editor_panel.frameChanged.connect(self._on_frame_changed)
@@ -67,222 +82,131 @@ class MainWindow(QMainWindow):
         self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
         self.editor_panel.exportRequested.connect(self._on_save_project)
 
-        # ─── Playback timer (used when playing back video) ───────────────
+        # Playback timer
         self.play_timer = QTimer()
+        self.play_clock = QElapsedTimer()
+        self.play_start_frame = 0
         self.play_timer.timeout.connect(self._on_timer_tick)
 
-        # ─── Build the menubar ───────────────────────────────────────────
+        # Menubar
         self._create_menu_bar()
-
-
-    # after _create_menu_bar()
         self.menuBar().setStyleSheet("""
-            QMenuBar {
-                background-color: #2D3748;
-                color: #E2E8F0;
-                spacing: 6px;          /* space between menu titles */
-                padding: 2px 10px;
-            }
-            QMenuBar::item {
-                background: transparent;
-                padding: 4px 12px;
-            }
-            QMenuBar::item:selected {
-                background-color: #4FD1C7;
-                color: #1A202C;
-                border-radius: 4px;
-            }
-
-            QMenu {
-                background-color: #2D3748;
-                color: #E2E8F0;
-                border: 1px solid #4A5568;
-                margin: 2px;
-            }
-            QMenu::item {
-                padding: 6px 20px;
-            }
-            QMenu::item:selected {
-                background-color: #4A5568;
-            }
+            QMenuBar { background-color: #2D3748; color: #E2E8F0; spacing: 6px; padding: 2px 10px; }
+            QMenuBar::item { background: transparent; padding: 4px 12px; }
+            QMenuBar::item:selected { background-color: #4FD1C7; color: #1A202C; border-radius: 4px; }
+            QMenu { background-color: #2D3748; color: #E2E8F0; border: 1px solid #4A5568; margin: 2px; }
+            QMenu::item { padding: 6px 20px; }
+            QMenu::item:selected { background-color: #4A5568; }
         """)
 
-
+    # ---------- Menus ----------
     def _create_menu_bar(self):
         menubar = self.menuBar()
-        
-        # Enhanced menu bar styling - REPLACE YOUR EXISTING menubar.setStyleSheet() with this:
         menubar.setStyleSheet("""
             QMenuBar {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2D3748, stop:1 #1A202C);
-                color: #E2E8F0;
-                spacing: 8px;
-                padding: 4px 12px;
-                border-bottom: 2px solid #4FD1C7;
-                font-weight: 500;
-                font-size: 13px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2D3748, stop:1 #1A202C);
+                color: #E2E8F0; spacing: 8px; padding: 4px 12px; border-bottom: 2px solid #4FD1C7;
+                font-weight: 500; font-size: 13px;
             }
-            QMenuBar::item {
-                background: transparent;
-                padding: 6px 14px;
-                border-radius: 6px;
-                margin: 2px;
-            }
+            QMenuBar::item { background: transparent; padding: 6px 14px; border-radius: 6px; margin: 2px; }
             QMenuBar::item:selected {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4FD1C7, stop:1 #38B2AC);
-                color: #1A202C;
-                font-weight: 600;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4FD1C7, stop:1 #38B2AC);
+                color: #1A202C; font-weight: 600;
             }
             QMenuBar::item:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #319795, stop:1 #2C7A7B);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #319795, stop:1 #2C7A7B);
                 color: #E6FFFA;
             }
-
             QMenu {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2D3748, stop:1 #1A202C);
-                color: #E2E8F0;
-                border: 2px solid #4A5568;
-                border-radius: 8px;
-                padding: 6px;
-                margin: 2px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2D3748, stop:1 #1A202C);
+                color: #E2E8F0; border: 2px solid #4A5568; border-radius: 8px; padding: 6px; margin: 2px;
             }
-            QMenu::item {
-                padding: 8px 24px;
-                border-radius: 4px;
-                margin: 1px;
-            }
+            QMenu::item { padding: 8px 24px; border-radius: 4px; margin: 1px; }
             QMenu::item:selected {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4A5568, stop:1 #2D3748);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4A5568, stop:1 #2D3748);
                 color: #4FD1C7;
             }
-            QMenu::separator {
-                height: 1px;
-                background: #4A5568;
-                margin: 6px 12px;
-            }
+            QMenu::separator { height: 1px; background: #4A5568; margin: 6px 12px; }
         """)
 
-        # ─── File Menu (ADD EMOJIS TO YOUR EXISTING MENU ITEMS) ─────────────
-        file_menu = menubar.addMenu("📁 File")
-
-        open_vid_action = QAction("🎬 Open Video…", self)
+        # File
+        file_menu = menubar.addMenu("File")
+        open_vid_action = QAction("Open Video...", self)
         open_vid_action.setShortcut("Ctrl+O")
         open_vid_action.triggered.connect(self._on_import_requested)
         file_menu.addAction(open_vid_action)
 
-        save_action = QAction("💾 Save Project…", self)
+        save_action = QAction("Save Project...", self)
         save_action.setShortcut("Ctrl+S")
         save_action.triggered.connect(self._on_save_project)
         file_menu.addAction(save_action)
 
         file_menu.addSeparator()
-
-        quit_action = QAction("🚪 Quit", self)
+        quit_action = QAction("Quit", self)
         quit_action.setShortcut("Ctrl+Q")
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
-        # ─── Edit Menu (ADD EMOJIS) ──────────────────────────────────────
-        edit_menu = menubar.addMenu("✏️ Edit")
-
-        undo_action = QAction("↶ Undo", self)
-        undo_action.setShortcut("Ctrl+Z")
-        undo_action.triggered.connect(lambda: None)
-        edit_menu.addAction(undo_action)
-
-        redo_action = QAction("↷ Redo", self)
-        redo_action.setShortcut("Ctrl+Y")
-        redo_action.triggered.connect(lambda: None)
-        edit_menu.addAction(redo_action)
-
+        # Edit
+        edit_menu = menubar.addMenu("Edit")
+        undo_action = QAction("Undo", self); undo_action.setShortcut("Ctrl+Z"); undo_action.triggered.connect(lambda: None)
+        redo_action = QAction("Redo", self); redo_action.setShortcut("Ctrl+Y"); redo_action.triggered.connect(lambda: None)
+        edit_menu.addAction(undo_action); edit_menu.addAction(redo_action)
         edit_menu.addSeparator()
-
-        preferences_action = QAction("⚙️ Preferences…", self)
+        preferences_action = QAction("Preferences...", self)
         preferences_action.triggered.connect(self._toggle_appearance)
         edit_menu.addAction(preferences_action)
 
-        # ─── View Menu (ADD EMOJIS) ─────────────────────────────────────────
-        view_menu = menubar.addMenu("👁️ View")
-
-        toggle_thumbs_action = QAction("🖼️ Toggle Thumbnails", self, checkable=True)
+        # View
+        view_menu = menubar.addMenu("View")
+        toggle_thumbs_action = QAction("Toggle Thumbnails", self, checkable=True)
         toggle_thumbs_action.setChecked(True)
-        toggle_thumbs_action.triggered.connect(lambda checked: self.editor_panel.thumbnail_scroll.setVisible(checked))
+        toggle_thumbs_action.triggered.connect(
+            lambda checked: self.editor_panel.thumbnail_scroll.setVisible(checked)
+        )
         view_menu.addAction(toggle_thumbs_action)
 
-        toggle_markers_action = QAction("🏷️ Toggle Markers Panel", self, checkable=True)
+        toggle_markers_action = QAction("Toggle Markers Panel", self, checkable=True)
         toggle_markers_action.setChecked(True)
-        toggle_markers_action.triggered.connect(lambda checked: self.editor_panel.gesture_list.parentWidget().setVisible(checked))
+        toggle_markers_action.triggered.connect(
+            lambda checked: self.editor_panel.gesture_list.parentWidget().setVisible(checked)
+        )
         view_menu.addAction(toggle_markers_action)
 
-        fullscreen_action = QAction("⛶ Fullscreen", self)
+        fullscreen_action = QAction("Fullscreen", self)
         fullscreen_action.setShortcut("F11")
         fullscreen_action.triggered.connect(self._toggle_fullscreen)
         view_menu.addAction(fullscreen_action)
 
-        # ─── Tools Menu (ADD EMOJIS) ────────────────────────────────────────
-        tools_menu = menubar.addMenu("🔧 Tools")
-
-        detect_action = QAction("🔍 Detect Gestures Now", self)
+        # Tools
+        tools_menu = menubar.addMenu("Tools")
+        detect_action = QAction("Detect Gestures", self)
         detect_action.triggered.connect(self.editor_panel.detectRequested.emit)
         tools_menu.addAction(detect_action)
 
-        blur_action = QAction("🫥 Blur Current Frame", self)
+        blur_action = QAction("Blur Current Frame", self)
         blur_action.triggered.connect(lambda: self.editor_panel.blurRequested.emit(self.editor_panel.current_frame_idx))
         tools_menu.addAction(blur_action)
 
-        export_action = QAction("📤 Export Blurred Video…", self)
+        export_action = QAction("Export Blurred Video...", self)
         export_action.triggered.connect(self._on_save_project)
         tools_menu.addAction(export_action)
 
-        clear_blurs_action = QAction("🧹 Clear All Blurs", self)
+        clear_blurs_action = QAction("Clear All Blurs", self)
         clear_blurs_action.triggered.connect(self._on_clear_blurs)
         tools_menu.addAction(clear_blurs_action)
 
-        # ─── Settings Menu (ADD EMOJIS) ─────────────────────────────────────
-        settings_menu = menubar.addMenu("⚙️ Settings")
-
-        video_settings_action = QAction("🎥 Video Settings…", self)
-        video_settings_action.triggered.connect(self._show_video_settings_dialog)
-        settings_menu.addAction(video_settings_action)
-
-        detection_settings_action = QAction("🎯 Detection Settings…", self)
-        detection_settings_action.triggered.connect(self._show_detection_settings_dialog)
-        settings_menu.addAction(detection_settings_action)
-
-        blur_settings_action = QAction("🌀 Blur Settings…", self)
-        blur_settings_action.triggered.connect(self._show_blur_settings_dialog)
-        settings_menu.addAction(blur_settings_action)
-
-        settings_menu.addSeparator()
-
-        shortcuts_action = QAction("⌨️ Keyboard Shortcuts…", self)
-        shortcuts_action.triggered.connect(self._show_shortcuts_reference)
-        settings_menu.addAction(shortcuts_action)
-
-        # ─── Help Menu (ADD EMOJIS) ─────────────────────────────────────────
-        help_menu = menubar.addMenu("❓ Help")
-
-        about_action = QAction("ℹ️ About StopFilming", self)
+        # Help
+        help_menu = menubar.addMenu("Help")
+        about_action = QAction("About StopFilming", self)
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
 
-        doc_action = QAction("📚 Documentation", self)
-        doc_action.triggered.connect(self._open_documentation)
-        help_menu.addAction(doc_action)
+        shortcuts_action = QAction("Keyboard Shortcuts", self)
+        shortcuts_action.triggered.connect(self._show_shortcuts_reference)
+        help_menu.addAction(shortcuts_action)
 
-        check_updates_action = QAction("🔄 Check for Updates…", self)
-        check_updates_action.triggered.connect(self._check_for_updates)
-        help_menu.addAction(check_updates_action)
-
-
-
-    # ─── Controller Slots ─────────────────────────────────────────────────
-
+    # ---------- Controller slots ----------
     def _on_import_requested(self):
         vid_path, _ = QFileDialog.getOpenFileName(
             self, "Open Video File", "",
@@ -291,14 +215,15 @@ class MainWindow(QMainWindow):
         if not vid_path:
             return
 
-        # 1) Load the new video into the core (this still clears blurred_cache)
         meta = self.core.load_video(vid_path)
 
-        # 2) Delete the old EditorPanel entirely:
+        # clean audio from old panel
         old_panel = self.editor_panel
+        if hasattr(old_panel, 'cleanup_audio_resources'):
+            old_panel.cleanup_audio_resources()
         old_panel.deleteLater()
 
-        # 3) Create a fresh EditorPanel and hook up all signals again:
+        # fresh panel
         self.editor_panel = EditorPanel()
         self.setCentralWidget(self.editor_panel)
         self.editor_panel.importRequested.connect(self._on_import_requested)
@@ -310,370 +235,356 @@ class MainWindow(QMainWindow):
         self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
         self.editor_panel.exportRequested.connect(self._on_save_project)
 
-        # 4) Initialize the new panel with the video info:
+        # init panel
         self.editor_panel.set_video_info(
             rotation_angle=meta["rotation_angle"],
             total_frames=meta["total_frames"],
             fps=meta["fps"]
         )
+        self.editor_panel.video_path = self.core.video_path  # sets up audio
 
-        # 5) Immediately grab frame 0 from the new core and display it:
+        # first frame
         frame0 = self.core.get_frame(0)
         if frame0 is not None:
+            frame0 = self._apply_rotation(frame0)
             self.editor_panel.display_frame(frame0, 0)
 
-        # 6) Build fresh thumbnails on the brand‐new panel:
+        # thumbnails
         thumbs = self.core.generate_thumbnails(num_thumbs=16)
         self.editor_panel.add_thumbnails(thumbs)
 
-        # 7) Update the window title:
-        self.setWindowTitle(f"StopFilming – Editing: {vid_path}")
-
-        # 8) Ensure the window does not resize beyond screen dimensions
-        screen = QApplication.primaryScreen()  # Get the primary screen
-        rect = screen.availableGeometry()  # Get screen's available geometry
-
-        self.showNormal()  # Ensure window is not maximized
-        self.resize(rect.width(), rect.height())  # Resize the window to fit the screen
-        
-
-        self.repaint()  # Repaint to apply the resize
-        QApplication.processEvents()  # Force UI update
+        # window title & fit
+        self.setWindowTitle(f"StopFilming — Editing: {vid_path}")
+        screen = QApplication.primaryScreen()
+        rect = screen.availableGeometry()
+        self.showNormal()
+        self.resize(rect.width(), rect.height())
+        self.repaint()
+        QApplication.processEvents()
 
     def _on_save_project(self):
-        """
-        Called from menu (“Save Project…”) or Tools → Export.
-        If no video loaded, show an info dialog. Otherwise, ask where to save MP4
-        and call core.export_video(...).
-        """
         if not self.core.video_path:
-            QMessageBox.information(self, "Save Project", "No project to save (no video loaded).")
+            QMessageBox.information(self, "Export", "No video loaded.")
             return
 
-        out_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Blurred Video As",
-            "",
-            "MP4 Video (*.mp4);;All Files (*)"
+        base, _ = os.path.splitext(os.path.basename(self.core.video_path))
+        suggest_name = f"{base}_export"
+        suggest_dir = os.path.dirname(self.core.video_path) or os.path.expanduser("~")
+
+        dlg = ExportDialog(self, suggest_name=suggest_name, suggest_dir=suggest_dir)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        cfg = dlg.result_values()
+        out_path = cfg["path"]
+        container = (cfg.get("container") or "mp4").lower()
+        codec     = (cfg.get("codec") or "mp4v").lower()
+
+        if container == "mp4" and codec in ("h264", "avc1", "x264"):
+            codec = "mp4v"
+            try:
+                self.statusBar().showMessage("Using MPEG-4 (mp4v) for maximum compatibility.", 5000)
+            except Exception:
+                pass
+
+        self.core.set_export_format(container)
+        self.core.set_export_codec(codec)
+        self.core.set_export_bitrate_mbps(int(cfg.get("bitrate_mbps", 12)))
+        self.core.set_export_overrides(cfg.get("resolution", "Original"), cfg.get("fps", "Original"))
+
+        self.proc = ProcessingDialog(self, title="Exporting – StopFilming",
+                                     message="Exporting video…", total_steps=100)
+        self.proc.setWindowModality(Qt.ApplicationModal)
+        self.proc.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.proc.show()
+        QApplication.processEvents()
+
+        self.export_thread = ExportWorker(self.core, out_path)
+        self.export_thread.progress.connect(
+            lambda pct: self.proc.set_progress(int(max(0, min(100, pct))), label=f"{int(pct)}%")
         )
-        if not out_path:
-            return
 
-        if not out_path.lower().endswith(".mp4"):
-            out_path += ".mp4"
+        def _done(ok, path):
+            if getattr(self, "proc", None):
+                self.proc.finish("Export complete" if ok else "Export failed")
+                self.proc = None
+            if ok:
+                QMessageBox.information(self, "Export", f"Exported to:\n{path}")
+            else:
+                QMessageBox.warning(self, "Export", "Failed to export edited video.")
+            try:
+                self.export_thread.quit()
+                self.export_thread.wait()
+            except Exception:
+                pass
+            self.export_thread = None
 
-        success = self.core.export_video(out_path)
-        if success:
-            QMessageBox.information(self, "Save Project", f"Exported to:\n{out_path}")
-        else:
-            QMessageBox.warning(self, "Save Project", "Failed to export edited video.")
-
+        self.export_thread.done.connect(_done)
+        self.export_thread.start()
 
     def _on_clear_blurs(self):
-        """
-        Clear all cached blurred frames in the model, clear the markers in the UI,
-        disable Blur Frame button.
-        """
         self.core.blurred_frames.clear()
         self.core.blurred_cache.clear()
         self.editor_panel.clear_markers()
         self.editor_panel.blur_button.setEnabled(False)
 
-
     def _on_play_toggled(self, play: bool):
-        """
-        User clicked Play/Pause.  If play=True, start the timer; if play=False, stop it.
-        """
+        if not self.core or not self.core.video_path:
+            return
+
         if play:
-            interval = int(1000 / self.core.fps) if self.core.fps > 0 else 33
-            self.play_timer.start(interval)
+            if self.core.cap is None or not self.core.cap.isOpened():
+                self.core.cap = cv2.VideoCapture(self.core.video_path, cv2.CAP_FFMPEG)
+                try:
+                    self.core.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Smaller buffer for responsiveness
+                except Exception:
+                    pass
+
+            start_at = max(0, int(self.editor_panel.current_frame_idx))
+            self.core.cap.set(cv2.CAP_PROP_POS_FRAMES, start_at)
+
+            self.play_start_frame = start_at
+            self.play_clock.start()
+
+            # Calculate proper timer interval based on FPS
+            fps = max(1.0, float(self.core.fps))
+            # Target slightly higher than FPS for smooth playback
+            timer_interval = max(8, int(1000.0 / fps / 1.2))  # 20% faster than frame rate
+            
+            self.play_timer.start(timer_interval)
+            self.editor_panel.toggle_button.setText("Pause")
+
+            self.editor_panel.audio_play_from_frame(self.editor_panel.current_frame_idx, fps)
         else:
             self.play_timer.stop()
+            self.editor_panel.toggle_button.setText("Play")
+            self.editor_panel.audio_pause()
 
+    def _apply_rotation(self, frame):
+        if frame is None:
+            return None
+        ra = getattr(self.core, "rotation_angle", 0) or 0
+        if ra == 90:
+            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        elif ra == 180:
+            return cv2.rotate(frame, cv2.ROTATE_180)
+        elif ra == 270:
+            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame
 
     def _on_frame_changed(self, frame_idx: int):
-        """
-        User dragged the slider to frame_idx.  Stop playback, show that frame (blurred if cached).
-        """
         self.play_timer.stop()
         self.editor_panel.toggle_button.setText("Play")
 
         if self.core.cap is not None:
             self.core.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        # Now fetch (blurred or raw) and display
+
         img = self.core.get_frame(frame_idx)
+        if frame_idx not in self.core.blurred_cache:
+            img = self._apply_rotation(img)
         self.editor_panel.display_frame(img, frame_idx)
-
-
+        self.editor_panel.audio_seek_to_frame(frame_idx, self.core.fps)
 
     def _on_timer_tick(self):
-        """
-        Called every ~1000/fps ms while playing. Grab the next frame from cv2.VideoCapture,
-        and display it in the UI. Only show blurred version if it exists in cache.
-        """
-        ret, frame = self.core.cap.read()
-        if not ret:
+        cap = self.core.cap
+        if cap is None or not cap.isOpened():
             self.play_timer.stop()
             self.editor_panel.toggle_button.setText("Play")
+            self.editor_panel.audio_pause()
             return
 
-        pos = int(self.core.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+        fps = max(1.0, float(self.core.fps))
+        elapsed_s = self.play_clock.elapsed() / 1000.0
+        target_idx = int(self.play_start_frame + elapsed_s * fps)
 
-        # Use cached blurred frame if available, otherwise show original frame
-        img = self.core.blurred_cache.get(pos, frame)
-        self.editor_panel.display_frame(img, pos)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        if target_idx >= total:
+            self.play_timer.stop()
+            self.editor_panel.toggle_button.setText("Play")
+            self.editor_panel.audio_pause()
+            return
 
-        # Remove these lines that were causing automatic blurring:
-        # frame = detect_and_blur_multiple_people(frame, frame_count=pos)
-        # img = self.core.blurred_cache.get(pos, frame)
-        # self.editor_panel.display_frame(img, pos)
+        current_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        
+        # Only seek if we're significantly off target (reduces expensive seeking)
+        if abs(current_pos - target_idx) > 2:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+        
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            # Try reading the next frame instead of failing
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                self.play_timer.stop()
+                self.editor_panel.toggle_button.setText("Play")
+                self.editor_panel.audio_pause()
+                return
+
+        frame = self._apply_rotation(frame)
+        actual_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+        display_frame = self.core.blurred_cache.get(actual_pos, frame)
+        self.editor_panel.display_frame(display_frame, actual_pos)
 
     def _on_detect_requested(self):
-        """
-        User clicked “Detect Gestures”. Show a dark‐themed, indeterminate QProgressDialog
-        with a moving color chunk, run core.detect_and_blur_hand_segments() in a thread,
-        then populate gesture_list/timestamps with person ID and gesture type.
-        """
         total = self.core.total_frames
         if total <= 0:
-            # No video loaded or empty video
             return
 
-        # ─── Create an indeterminate, dark‐themed QProgressDialog ──────────────
-        self.progress = QProgressDialog("Detecting gestures… Please wait…", None, 0, 0, self.editor_panel)
-        self.progress.setWindowTitle("Processing")
-        self.progress.setWindowModality(Qt.ApplicationModal)
-        self.progress.setCancelButton(None)
-        self.progress.setMinimumDuration(0)
-        self.progress.setAutoClose(False)
-        self.progress.setAutoReset(False)
-        self.progress.setMinimumSize(300, 100)
-        self.progress.setWindowFlags(
-            self.progress.windowFlags()
-            & ~Qt.WindowContextHelpButtonHint
+        if hasattr(self.editor_panel, "get_detection_params"):
+            det_params = self.editor_panel.get_detection_params()
+            if hasattr(self.core, "set_detection_params"):
+                self.core.set_detection_params(
+                    confidence=det_params["confidence"],
+                    frame_skip=det_params["frame_skip"],
+                )
+            else:
+                setattr(self.core, "confidence", det_params["confidence"])
+                setattr(self.core, "frame_skip", det_params["frame_skip"])
+
+        self.proc = ProcessingDialog(
+            self, title="Processing – StopFilming",
+            message="Detecting gestures… Please wait…",
+            total_steps=None
         )
-        self.progress.setStyleSheet("""
-            QProgressDialog {
-                background-color: #2b2b2b;
-                color: #e0e0e0;
-                border-radius: 8px;
-                padding: 0px;
-                margin: 0px;
-            }
-            QProgressBar {
-                border: 1px solid #555555;
-                border-radius: 5px;
-                text-align: center;
-                background-color: #3c3c3c;
-                color: #ffffff;
-                height: 25px;
-                min-width: 0;
-                width: 100%;
-                margin-left: 0px;
-                margin-right: 0px;
-                padding-left: 0px;
-                padding-right: 0px;
-            }
-            QProgressBar::chunk {
-                background-color: #6cace4;
-                animation: busybar 1s linear infinite;
-            }
-            QLabel {
-                color: #e0e0e0;
-            }
-            @keyframes busybar {
-                0% { margin-left: 0px; }
-                100% { margin-left: 100%; }
-            }
-        """)
+        self.proc.show()
 
-        self.elapsed_label = QLabel("00:00", self.progress)
-        self.elapsed_label.setStyleSheet("""
-            color: #fff;
-            font-size: 12px;
-            font-weight: normal;
-            background: transparent;
-        """)
-        self.elapsed_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-        # Position it precisely over the right edge of the progress bar
-        progress_bar = self.progress.findChild(QProgressBar)
-        if progress_bar:
-            progress_bar_rect = progress_bar.geometry()
-            label_width = 40
-            label_height = 20
-            self.elapsed_label.setGeometry(
-                progress_bar_rect.right() - label_width + 2,
-                progress_bar_rect.top() + (progress_bar_rect.height() - label_height) // 2,
-                label_width,
-                label_height
-            )
-        self.elapsed_label.show()
-
-        # Timer for updating elapsed time
-        self._detect_start_time = time.time()
-        self._detect_timer = QTimer(self.progress)
-        self._detect_timer.timeout.connect(self._update_detect_elapsed)
-        self._detect_timer.start(500)
-
-        self.progress.show()
-        QApplication.processEvents()
-
-        for child in self.progress.findChildren(QProgressDialog):
-            child.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            child.setMinimumWidth(500)
-
-        # ─── Run detection in a background thread ─────────────
         self.detect_thread = GestureDetectWorker(self.core)
         self.detect_thread.finished.connect(self._on_gesture_detection_finished)
         self.detect_thread.start()
 
-    def _update_detect_elapsed(self):
-        if hasattr(self, "_detect_start_time") and hasattr(self, "elapsed_label"):
-            elapsed = int(time.time() - self._detect_start_time)
-            mm = elapsed // 60
-            ss = elapsed % 60
-            self.elapsed_label.setText(f"{mm:02d}:{ss:02d}")
-    
     def _on_gesture_detection_finished(self, segment_starts):
-        """Handle completion of gesture detection"""
-        self.progress.close()
-        self._detect_timer.stop()
+        if hasattr(self, "proc") and self.proc:
+            self.proc.finish("Detection complete")
+            self.proc = None
 
-        # Populate gesture list with detected gestures
+        segment_starts = sorted(segment_starts, key=lambda s: s[2])
+
         self.editor_panel.gesture_list.clear()
-        for person_id, gesture_type, frame_idx, bbox in segment_starts:
-            t = frame_idx / self.core.fps
-            mm = int(t // 60)
-            ss = int(t % 60)
-            msec = int((t - int(t)) * 1000)
-            time_str = f"{mm:02}:{ss:02}.{msec:03}"
+        for person_id, gesture_type, raw_frame, bbox in segment_starts:
+            if isinstance(raw_frame, float):
+                frame_idx = int(round(raw_frame * max(1, self.core.fps)))
+            else:
+                frame_idx = int(raw_frame)
 
+            frame_idx = max(0, min(frame_idx, max(0, self.core.total_frames - 1)))
+
+            t = frame_idx / max(1, self.core.fps)
+            mm = int(t // 60); ss = int(t % 60); msec = int((t - int(t)) * 1000)
+            time_str = f"{mm:02}:{ss:02}.{msec:03d}"
             emoji = "👋" if gesture_type == "wave" else "🫣"
-            item_str = f"{emoji} Person {person_id} {gesture_type.capitalize()} - ({time_str})"
-            item = QListWidgetItem(item_str)
-            item.setData(Qt.UserRole, (frame_idx, bbox))  # Store frame_idx and bbox
+            label = f"{emoji} Person {person_id} {gesture_type.capitalize()}  –  ({time_str})"
+
+            from PyQt5.QtWidgets import QListWidgetItem
+            item = QListWidgetItem(label)
+            payload = {"person_id": int(person_id), "gesture": str(gesture_type),
+                       "frame": frame_idx, "bbox": bbox}
+            item.setData(Qt.UserRole, payload)
             self.editor_panel.gesture_list.addItem(item)
 
-        # Enable blur button if gestures were found
-        if segment_starts:
-            self.editor_panel.blur_button.setEnabled(True)
-            
-        print(f"\nDetection complete: Found {len(segment_starts)} gestures")
+        has_items = self.editor_panel.gesture_list.count() > 0
+        self.editor_panel.blur_button.setEnabled(has_items)
+        self.statusBar().showMessage(f"Detected {self.editor_panel.gesture_list.count()} gesture(s)")
 
-
-
-    def _on_blur_requested(self, frame_idx: int):
-        """
-        User clicked "Blur Person" for a selected gesture timestamp.
-        """
-        selected_items = self.editor_panel.gesture_list.selectedItems()
-        if not selected_items:
+    def _on_blur_requested(self, _frame_idx_from_button: int):
+        selected = self.editor_panel.gesture_list.selectedItems()
+        if not selected:
+            return
+        payload = selected[0].data(Qt.UserRole)
+        if not payload:
             return
 
-        item = selected_items[0]
-        frame_idx, bbox = item.data(Qt.UserRole)
+        frame_idx = int(payload["frame"])
+        bbox = payload["bbox"]
 
-        # Create progress dialog
-        progress = QProgressDialog("Blurring person in video... Please wait...", None, 0, self.core.total_frames, self)
-        progress.setWindowTitle("Processing")
-        progress.setWindowModality(Qt.ApplicationModal)
-        progress.setCancelButton(None)
-        progress.setMinimumDuration(0)
-        progress.setStyleSheet("""
-            QProgressDialog {
-                background: #2D3748;
-                color: #E2E8F0;
-                border-radius: 8px;
-            }
-            QProgressBar {
-                border: 1px solid #4A5568;
-                border-radius: 4px;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background: #4FD1C7;
-            }
-        """)
-        progress.show()
+        sel_pid = payload.get("person_id", "?")
+        self.editor_panel.show_selection_badge(f"Blurring Person {sel_pid}…")
 
-        # Blur the person throughout the video
-        blurred_frames = self.core.blur_person_in_video(
-            bbox, 
-            0,
-            progress_callback=progress.setValue
-        )
+        self.editor_panel.start_blur_progress(title="Processing", text="Blurring person in video…")
 
-        # Update the blurred frames set
+        def _to_percent(v):
+            total = max(1, self.core.total_frames)
+            self.editor_panel.set_blur_progress(int(100 * v / total))
+
+        blurred_frames = self.core.blur_person_in_video(bbox, 0, progress_callback=_to_percent)
         self.core.blurred_frames.update(blurred_frames)
 
-        progress.close()
+        self.editor_panel.finish_blur_progress(True)
+        self.editor_panel.hide_selection_badge()
 
-        # Show the current frame
         img = self.core.get_frame(frame_idx)
         self.editor_panel.display_frame(img, frame_idx)
-        self.editor_panel.current_frame_idx = frame_idx  # Sync slider and current frame index
-
-
+        self.editor_panel.current_frame_idx = frame_idx
 
     def _on_thumbnail_clicked(self, frame_idx: int):
-        """
-        User clicked one of the 16 thumbnails. Jump to that frame.
-        """
         self.play_timer.stop()
         self.editor_panel.toggle_button.setText("Play")
-
         img = self.core.get_frame(frame_idx)
         self.editor_panel.display_frame(img, frame_idx)
         self.editor_panel.blur_button.setEnabled(True)
 
+    def _on_gesture_item_clicked(self, payload):
+        pid, gest, bbox = "?", "", None
 
-    def _on_gesture_item_clicked(self, frame_idx: int):
-        """
-        User clicked an item in the Detected Gestures list. Jump to that frame.
-        """
+        if isinstance(payload, dict):
+            frame_idx = payload.get("frame", 0)
+            pid = payload.get("person_id", "?")
+            gest = str(payload.get("gesture", "")).capitalize()
+            bbox = payload.get("bbox")
+        elif hasattr(payload, "data"):
+            data = payload.data(Qt.UserRole)
+            if isinstance(data, dict):
+                frame_idx = data.get("frame", 0)
+                pid = data.get("person_id", "?")
+                gest = str(data.get("gesture", "")).capitalize()
+                bbox = data.get("bbox")
+            else:
+                frame_idx = int(data)
+        else:
+            frame_idx = int(payload) if isinstance(payload, (int, float)) else 0
+
+        if isinstance(frame_idx, float):
+            frame_idx = int(round(frame_idx * max(1, self.core.fps)))
+
+        frame_idx = max(0, min(int(frame_idx), max(0, self.core.total_frames - 1)))
+
         self.play_timer.stop()
         self.editor_panel.toggle_button.setText("Play")
 
-        img = self.core.get_frame(frame_idx)
-        self.editor_panel.display_frame(img, frame_idx)
-        self.editor_panel.blur_button.setEnabled(True)
+        if hasattr(self.editor_panel, "frame_slider"):
+            sld = self.editor_panel.frame_slider
+            try:
+                sld.blockSignals(True)
+                if sld.maximum() != max(0, self.core.total_frames - 1):
+                    sld.setMaximum(max(0, self.core.total_frames - 1))
+                sld.setValue(frame_idx)
+            finally:
+                sld.blockSignals(False)
 
+        self._on_frame_changed(frame_idx)
 
+        if gest:
+            self.editor_panel.show_selection_badge(f"Selected: Person {pid} • {gest}")
+            self.statusBar().showMessage(f"Selected Person {pid} • {gest} @ frame {frame_idx}")
+
+    # ---------- misc ----------
     def _open_documentation(self):
         webbrowser.open("https://example.com/stopfilming/docs")
-
 
     def _check_for_updates(self):
         QMessageBox.information(self, "Check for Updates", "No updates available.")
 
-
     def _toggle_appearance(self):
-        """
-        (Placeholder) Toggle between light & dark theme. Currently not implemented.
-        """
         QMessageBox.information(self, "Appearance", "Toggle light/dark (not implemented).")
-
-
-   
 
     def _show_shortcuts_reference(self):
         dlg = KeyboardShortcutsDialog(self)
         dlg.exec_()
 
-
-
     def _show_about_dialog(self):
         QMessageBox.information(self, "About StopFilming", "StopFilming v1.0\n© 2025")
 
-
     def resizeEvent(self, event):
-        """
-        If you want to do something on window‐resize, override here.
-        """
         super().resizeEvent(event)
-        # (No extra behavior at the moment)
-
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
@@ -681,77 +592,44 @@ class MainWindow(QMainWindow):
         else:
             self.showFullScreen()
 
-    #Settings---------------------------------
     def _show_video_settings_dialog(self):
-        QMessageBox.information(
-            self,
-            "Video Settings",
-            "Video‐settings are not implemented yet."
-        )
+        QMessageBox.information(self, "Video Settings", "Video-settings are not implemented yet.")
+
     def _show_detection_settings_dialog(self):
-        QMessageBox.information(
-            self,
-            "Detection Settings",
-            "Detection settings are not implemented yet."
-        )
+        QMessageBox.information(self, "Detection Settings", "Detection settings are not implemented yet.")
+
     def _show_blur_settings_dialog(self):
-        QMessageBox.information(
-            self,
-            "Blur Settings",
-            "Blur settings are not implemented yet."
-        )
+        QMessageBox.information(self, "Blur Settings", "Blur settings are not implemented yet.")
 
-
-    def _on_export_video_requested(self):
-        """
-        Called when the 'Export Video' button is clicked.
-        Calls the same method as Save Project to export the video.
-        """
-        self._on_save_project()  # This method already handles exporting the video
 
 def create_eye_icon():
-    """Create a custom eye icon for the application"""
-    # Create a 32x32 pixmap
     pixmap = QPixmap(32, 32)
     pixmap.fill(Qt.transparent)
-    
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    
-    # Draw eye shape (outer ellipse)
-    painter.setPen(QPen(QColor(70, 130, 180), 2))  # Steel blue
-    painter.setBrush(QBrush(QColor(100, 149, 237)))  # Cornflower blue
+    painter.setPen(QPen(QColor(70, 130, 180), 2))
+    painter.setBrush(QBrush(QColor(100, 149, 237)))
     painter.drawEllipse(2, 10, 28, 12)
-    
-    # Draw pupil (inner circle)
-    painter.setPen(QPen(QColor(25, 25, 112), 2))  # Midnight blue
+    painter.setPen(QPen(QColor(25, 25, 112), 2))
     painter.setBrush(QBrush(QColor(25, 25, 112)))
     painter.drawEllipse(13, 13, 6, 6)
-    
-    # Draw highlight on pupil
     painter.setPen(Qt.NoPen)
     painter.setBrush(QBrush(QColor(255, 255, 255, 180)))
     painter.drawEllipse(14, 14, 2, 2)
-    
     painter.end()
     return QIcon(pixmap)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    # Set application-wide properties (ADD THESE LINES)
-    app.setApplicationName("StopFilming")
-    app.setApplicationVersion("1.0")
-    app.setOrganizationName("Privacy Tools")
-    app.setApplicationDisplayName("StopFilming - Privacy Protection Video Editor")
-    app.setWindowIcon(create_eye_icon())  # Global app icon
+    QApplication.setApplicationName("StopFilming")
+    QApplication.setApplicationDisplayName("StopFilming – Privacy Protection Video Editor")
+    QApplication.setApplicationVersion("1.0")
+    app.setWindowIcon(create_eye_icon())
 
     window = MainWindow()
-
-    # resize window to fit the device's screen size
     screen = app.primaryScreen()
     rect = screen.availableGeometry()
     window.resize(rect.width(), rect.height())
     window.showMaximized()
-
     sys.exit(app.exec_())
