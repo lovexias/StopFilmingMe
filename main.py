@@ -88,6 +88,11 @@ class MainWindow(QMainWindow):
         self.play_start_frame = 0
         self.play_timer.timeout.connect(self._on_timer_tick)
 
+        # Add memory monitor
+        self.memory_timer = QTimer()
+        self.memory_timer.timeout.connect(self._check_memory)
+        self.memory_timer.start(5000)
+
         # Menubar
         self._create_menu_bar()
         self.menuBar().setStyleSheet("""
@@ -205,6 +210,35 @@ class MainWindow(QMainWindow):
         shortcuts_action = QAction("Keyboard Shortcuts", self)
         shortcuts_action.triggered.connect(self._show_shortcuts_reference)
         help_menu.addAction(shortcuts_action)
+
+    def _check_memory(self):
+        """Monitor memory usage and show warnings"""
+        try:
+            import psutil
+            memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+            
+            if memory_mb > 2048:  # More than 2GB
+                print(f"⚠️ High memory usage: {memory_mb:.0f}MB")
+                
+                # Trigger cleanup in core
+                if hasattr(self.core, '_frame_cache'):
+                    self.core._frame_cache.clear()
+                    print("🧹 Cleared frame cache")
+                
+                # Force garbage collection
+                import gc
+                gc.collect()
+                
+                # Show user warning if very high
+                if memory_mb > 4096:  # More than 4GB
+                    QMessageBox.warning(
+                        self, 
+                        "Memory Warning", 
+                        f"High memory usage detected ({memory_mb:.0f}MB).\n"
+                        "Consider restarting the application or using a smaller video."
+                    )
+        except ImportError:
+            pass  # psutil not available
 
     # ---------- Controller slots ----------
     def _on_import_requested(self):
@@ -485,7 +519,9 @@ class MainWindow(QMainWindow):
         self.editor_panel.blur_button.setEnabled(has_items)
         self.statusBar().showMessage(f"Detected {self.editor_panel.gesture_list.count()} gesture(s)")
 
+    # Alternative fix in main.py - Remove the parameters from the call:
     def _on_blur_requested(self, _frame_idx_from_button: int):
+        # 1) read the selected gesture payload
         selected = self.editor_panel.gesture_list.selectedItems()
         if not selected:
             return
@@ -495,22 +531,32 @@ class MainWindow(QMainWindow):
 
         frame_idx = int(payload["frame"])
         bbox = payload["bbox"]
-
         sel_pid = payload.get("person_id", "?")
+
         self.editor_panel.show_selection_badge(f"Blurring Person {sel_pid}…")
 
-        self.editor_panel.start_blur_progress(title="Processing", text="Blurring person in video…")
+        # 2) start blur dialog (same look as "Detecting gestures…")
+        self.editor_panel.start_blur_progress()
 
-        def _to_percent(v):
-            total = max(1, self.core.total_frames)
-            self.editor_panel.set_blur_progress(int(100 * v / total))
+        # 3) progress callback → updates the same pretty bar
+        def _blur_progress_cb(pct: int):
+            self.editor_panel.set_blur_progress(int(pct))
 
-        blurred_frames = self.core.blur_person_in_video(bbox, 0, progress_callback=_to_percent)
-        self.core.blurred_frames.update(blurred_frames)
 
-        self.editor_panel.finish_blur_progress(True)
-        self.editor_panel.hide_selection_badge()
 
+        # 4) run your blur routine (pick ONE path)
+        #    A) if you blur directly into the preview buffer:
+        ok = self.core.blur_person_in_video(bbox, start_frame=frame_idx,
+                                    progress_callback=_blur_progress_cb)
+
+
+        #    B) if you instead render/export the blurred video, use this instead:
+        # ok = self.core.export_video(out_path, progress_cb=_blur_progress_cb)
+
+        # 5) finish dialog once
+        self.editor_panel.finish_blur_progress(bool(ok))
+
+        # 6) optional: refresh the preview at the current frame
         img = self.core.get_frame(frame_idx)
         self.editor_panel.display_frame(img, frame_idx)
         self.editor_panel.current_frame_idx = frame_idx

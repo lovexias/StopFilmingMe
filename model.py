@@ -4,6 +4,8 @@ import shutil
 import tempfile
 import subprocess
 import numpy as np
+import shutil
+import tempfile
 
 from utilities import (
     WaveDetector,
@@ -47,16 +49,47 @@ class EditorCore:
         # Which frames to blur:
         self.blurred_frames = set()        # set of frame indices
         self.blurred_cache = dict()        # frame_idx -> blurred BGR numpy array
+        self._frame_cache = {}  # Simple frame cache
+        self._max_cached_frames = 50
+
+    
+    def get_frame(self, frame_idx: int):
+        # Check cache first
+        if frame_idx in self._frame_cache:
+            return self._frame_cache[frame_idx].copy()
+        
+        # Load from video
+        if self.cap is None:
+            return None
+
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = self.cap.read()
+        if not ret or frame is None:
+            return None
+        
+        frame = self._apply_rotation(frame)
+        
+        # Cache the frame (LRU eviction)
+        if len(self._frame_cache) >= self._max_cached_frames:
+            # Remove oldest entry
+            oldest_key = next(iter(self._frame_cache))
+            del self._frame_cache[oldest_key]
+        
+        self._frame_cache[frame_idx] = frame.copy()
+        return frame
 
     def _validate_fps(self, fps_value):
         """Validate and normalize FPS value to handle problematic video metadata"""
         try:
             fps = float(fps_value)
             
-            # Handle common problematic FPS values
-            if fps <= 0 or fps > 120:
-                print(f"Warning: Unusual FPS value {fps}, defaulting to 30")
+            # Handle common problematic FPS values - ALLOW HIGHER FPS
+            if fps <= 0:
+                print(f"Warning: Invalid FPS value {fps}, defaulting to 30")
                 return 30.0
+            elif fps > 240:  # Increased from 120 to 240 for high-speed cameras
+                print(f"Warning: Extremely high FPS value {fps}, capping at 240")
+                return 240.0
             elif fps < 1:
                 print(f"Warning: Very low FPS value {fps}, defaulting to 30") 
                 return 30.0
@@ -66,8 +99,10 @@ class EditorCore:
                 return round(fps, 3)
             elif 59 <= fps <= 61:  # 59.94, 60 FPS content
                 return round(fps, 3)
+            elif 119 <= fps <= 121:  # 120 FPS content
+                return round(fps, 3)
             else:
-                # Other valid FPS values
+                # Other valid FPS values - PRESERVE ORIGINAL
                 return round(fps, 3)
                 
         except (ValueError, TypeError):
@@ -158,6 +193,21 @@ class EditorCore:
         self.blurred_frames.clear()
         self.blurred_cache.clear()
 
+
+        # DEBUG: Check what FPS values we're getting
+        fps_raw = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        fps_validated = self._validate_fps(fps_raw)
+        
+        print(f"=== FPS DEBUG ===")
+        print(f"Raw FPS from video: {fps_raw}")
+        print(f"Validated FPS: {fps_validated}")
+        print(f"Total frames: {self.total_frames}")
+        print(f"Calculated duration: {self.total_frames / fps_validated:.2f}s")
+        print("================")
+        
+        self.fps = fps_validated
+        
+
         return {
             "rotation_angle": self.rotation_angle,
             "total_frames": self.total_frames,
@@ -191,63 +241,62 @@ class EditorCore:
         return frame_bgr
 
     def detect_and_blur_hand_segments(self, progress_callback=None):
+        """Multi-threaded gesture detection - won't freeze UI"""
         if not self.video_path:
             return []
 
-        print("PASS 1: Analyzing video for gesture detection...")
-
-        gesture_timestamps = []
-        frame_count = 0
-        skip = max(1, int(self.frame_skip))  # respect UI frame-skip
-        detected_person_gestures = {}
-
-        cap = cv2.VideoCapture(self.video_path, cv2.CAP_FFMPEG)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-
-        while cap.isOpened() and frame_count < total_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                break
-
-            frame = self._apply_rotation(frame)
-
-            # use UI confidence threshold
-            people = detect_multiple_people_yolov8(frame, conf_threshold=float(self.confidence_threshold))
-            if people:
-                # print(f"Frame {frame_count}: {len(people)} person(s)")
+        print("PASS 1: Multi-threaded gesture analysis...")
+        
+        # Split video into 4 chunks for parallel processing
+        total_frames = self.total_frames
+        chunk_size = total_frames // 4
+        chunks = []
+        
+        for i in range(4):
+            start_frame = i * chunk_size
+            end_frame = (i + 1) * chunk_size if i < 3 else total_frames
+            chunks.append((start_frame, end_frame))
+        
+        # Process chunks in parallel
+        all_detections = []
+        completed_chunks = 0
+        
+        def process_chunk(start_frame, end_frame):
+            """Process a chunk of frames"""
+            chunk_detections = []
+            cap = cv2.VideoCapture(self.video_path, cv2.CAP_FFMPEG)
+            
+            for frame_idx in range(start_frame, end_frame, self.frame_skip):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                    
+                frame = self._apply_rotation(frame)
+                people = detect_multiple_people_yolov8(frame, conf_threshold=self.confidence_threshold)
+                
                 for person_id, bbox in enumerate(people, 1):
-                    detected_gestures = detected_person_gestures.get(person_id, set())
-
-                    if "wave" not in detected_gestures:
-                        if detect_gesture_in_person_box(bbox, cap, "wave", self.fps, 2):
-                            gesture_timestamps.append((person_id, "wave", frame_count, bbox))
-                            detected_gestures.add("wave")
-
-                    if "cover_face" not in detected_gestures:
-                        if detect_gesture_in_person_box(bbox, cap, "hand_over_face", self.fps, 2):
-                            gesture_timestamps.append((person_id, "cover_face", frame_count, bbox))
-                            detected_gestures.add("cover_face")
-
-                    detected_person_gestures[person_id] = detected_gestures
-
-            if progress_callback:
-                try:
-                    pct = int(min(100, (frame_count + 1) * 100 / max(1, total_frames)))
-                    progress_callback(pct)
-                except Exception:
-                    pass
-
-            frame_count += skip
-
-        if progress_callback:
-            try:
-                progress_callback(100)
-            except Exception:
-                pass
-
-        cap.release()
-        return gesture_timestamps
+                    # Quick gesture detection
+                    if detect_gesture_in_person_box(bbox, cap, "wave", self.fps, 1):  # Reduced duration
+                        chunk_detections.append((person_id, "wave", frame_idx, bbox))
+            
+            cap.release()
+            return chunk_detections
+        
+        # Use ThreadPoolExecutor for parallel processing
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(process_chunk, start, end) for start, end in chunks]
+            
+            for future in concurrent.futures.as_completed(futures):
+                chunk_result = future.result()
+                all_detections.extend(chunk_result)
+                completed_chunks += 1
+                
+                if progress_callback:
+                    progress_callback(int(100 * completed_chunks / 4))
+        
+        return sorted(all_detections, key=lambda x: x[2])
 
     # ────────────────────────────────────────────────────────────────
     # Frame access
@@ -354,46 +403,136 @@ class EditorCore:
         if ext.lower() != want_ext:
             output_path = root + want_ext
 
-        # If ffmpeg exists, use it to honor bitrate/codec/res/fps exactly
+        # Check for ffmpeg
         ffmpeg = shutil.which("ffmpeg")
 
         if ffmpeg:
-            # 1) write an intermediate (scaled to resolution so ffmpeg just handles codec/bitrate/fps cleanly)
-            tmp_mp4 = os.path.join(tempfile.gettempdir(), "sfm_intermediate.mp4")
-            if os.path.exists(tmp_mp4):
-                try: os.remove(tmp_mp4)
-                except Exception: pass
-
-            ok = self._write_intermediate_with_opencv(tmp_mp4, out_w, out_h, out_fps, progress_cb=progress_cb)
-            if not ok:
-                return False
-
-            # 2) transcode to final with requested codec/bitrate/container
-            vcodec = self._ffmpeg_codec(self.export_codec)
-            mbps = max(1, int(self.export_bitrate_mbps))
-
-            cmd = [
-                ffmpeg, "-y",
-                "-i", tmp_mp4,
-                "-c:v", vcodec,
-                "-b:v", f"{mbps}M",
-                "-r", str(out_fps),
-                "-pix_fmt", "yuv420p",   # better compatibility
-                output_path
-            ]
-
-            try:
-                # We won't parse progress; split progress roughly 50..100%
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            print("Using ffmpeg for export with audio preservation")
+            return self._export_with_ffmpeg_and_audio(output_path, out_w, out_h, out_fps, progress_cb)
+        else:
+            print("Warning: ffmpeg not found. Export will not include audio.")
+            return self._export_opencv_fallback(output_path, out_w, out_h, out_fps, progress_cb)
+        
+        # Add these new methods to the EditorCore class:
+        
+    def _export_with_ffmpeg_and_audio(self, output_path: str, out_w: int, out_h: int, out_fps: float, progress_cb=None):
+        """Export video with ffmpeg, preserving audio and applying blur effects"""
+        import subprocess
+        
+        vcodec = self._ffmpeg_codec(self.export_codec)
+        mbps = max(1, int(self.export_bitrate_mbps))
+        
+        try:
+            # Step 1: Create a temporary directory for frame processing
+            with tempfile.TemporaryDirectory() as temp_dir:
                 if progress_cb:
-                    try: progress_cb(100)
-                    except Exception: pass
-                return True
-            except Exception:
-                # fallback to plain OpenCV path if ffmpeg fails
-                pass
+                    progress_cb(5)
+                
+                # Step 2: Process frames and save them as individual images
+                frames_dir = os.path.join(temp_dir, "frames")
+                os.makedirs(frames_dir, exist_ok=True)
+                
+                in_cap = cv2.VideoCapture(self.video_path, cv2.CAP_FFMPEG)
+                try:
+                    in_cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+                except Exception:
+                    pass
+                    
+                if not in_cap.isOpened():
+                    return False
 
-        # ── OpenCV-only fallback ────────────────────────────────────
+                total_frames = int(in_cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+                
+                # Process and save frames
+                for i in range(total_frames):
+                    ret, frame = in_cap.read()
+                    if not ret or frame is None:
+                        break
+                        
+                    frame = self._apply_rotation(frame)
+                    
+                    # Resize if needed
+                    if frame.shape[1] != out_w or frame.shape[0] != out_h:
+                        frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+
+                    # Apply blur if scheduled
+                    if i in self.blurred_frames and i in self.blurred_cache:
+                        frame = self.blurred_cache[i]
+                    elif i in self.blurred_frames:
+                        # Apply blur to this frame
+                        from utilities import detect_multiple_people_yolov8, blur_faces_of_person
+                        people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+                        if people:
+                            frame = blur_faces_of_person(frame, people[0])  # Blur first detected person
+                    
+                    # Save frame as PNG (lossless)
+                    frame_path = os.path.join(frames_dir, f"frame_%08d.png" % i)
+                    cv2.imwrite(frame_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])  # Fast compression
+                    
+                    if progress_cb and (i % 10 == 0 or i == total_frames - 1):
+                        progress_cb(int(5 + (i + 1) * 80 / total_frames))  # 5-85% for frame processing
+
+                in_cap.release()
+                
+                if progress_cb:
+                    progress_cb(85)
+                
+                # Step 3: Use ffmpeg to combine frames with original audio
+                frame_pattern = os.path.join(frames_dir, "frame_%08d.png")
+                
+                # Build ffmpeg command to combine frames with audio from original video
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-framerate", str(out_fps),
+                    "-i", frame_pattern,           # Input: processed frames
+                    "-i", self.video_path,         # Input: original video (for audio)
+                    "-map", "0:v",                 # Use video from first input (frames)
+                    "-map", "1:a",                 # Use audio from second input (original video)
+                    "-c:v", vcodec,
+                    "-b:v", f"{mbps}M",
+                    "-c:a", "aac",                 # Re-encode audio as AAC (compatible)
+                    "-b:a", "128k",                # Audio bitrate
+                    "-shortest",                   # End when shortest stream ends
+                    "-pix_fmt", "yuv420p",         # Ensure compatibility
+                    "-r", str(out_fps),            # Output framerate
+                    output_path
+                ]
+                
+                if progress_cb:
+                    progress_cb(90)
+                
+                print(f"Running ffmpeg: {' '.join(cmd[:8])}...")  # Don't log full paths
+                
+                # Run ffmpeg with error capture
+                result = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+                
+                if result.returncode != 0:
+                    print(f"FFmpeg error (return code {result.returncode}):")
+                    print(f"stderr: {result.stderr[-1000:]}")  # Last 1000 chars of error
+                    return False
+                
+                if progress_cb:
+                    progress_cb(100)
+                    
+                print(f"Export completed successfully: {output_path}")
+                return True
+                
+        except subprocess.TimeoutExpired:
+            print("FFmpeg export timed out")
+            return False
+        except Exception as e:
+            print(f"Export with audio failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _export_opencv_fallback(self, output_path: str, out_w: int, out_h: int, out_fps: float, progress_cb=None):
+        """Fallback export using OpenCV (no audio)"""
         in_cap = cv2.VideoCapture(self.video_path, cv2.CAP_FFMPEG)
         try:
             in_cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
@@ -422,6 +561,7 @@ class EditorCore:
             if i in self.blurred_frames and i in self.blurred_cache:
                 writer.write(self.blurred_cache[i])
             elif i in self.blurred_frames:
+                from utilities import blur_faces_of_person
                 writer.write(blur_faces_of_person(frame))
             else:
                 writer.write(frame)

@@ -1,5 +1,5 @@
 # ──── Enhanced Video Editor Interface ──────────────────────────────────────────────────────
-
+import time
 import cv2
 import numpy as np
 from PyQt5.QtWidgets import (
@@ -157,17 +157,21 @@ class ExportDialog(QDialog):
         }
 
 
-class ProcessingDialog(QDialog):
+class ProcessingDialog(QDialog):  # Keep the same name!
     """
-    Consistent, modern progress dialog.
-    - indeterminate: pass total_steps=None (shows busy bar)
-    - determinate: pass total_steps=int and call .set_progress(current)
+    Enhanced progress dialog with better visual feedback - keeping original name
     """
-    def __init__(self, parent, title="Processing", message="Working…", total_steps=None, allow_cancel=False):
+    def __init__(self, parent, title="Processing", message="Working...", total_steps=None, allow_cancel=False):
         super().__init__(parent)
-        self.setWindowTitle(title)
+        # Fix: Clean up the title to avoid repetition
+        clean_title = title.replace("StopFilming", "").replace("—", "").strip()
+        if not clean_title or clean_title == "Processing":
+            clean_title = "StopFilming"
+        
+        self.setWindowTitle(clean_title)
         self.setModal(True)
         self.setMinimumWidth(420)
+        self.setMaximumWidth(500)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         # Stylesheet (rounded bar, accent chunk, dark bg)
@@ -180,10 +184,13 @@ class ProcessingDialog(QDialog):
             }}
             QLabel {{
                 color: {TEXT};
+                font-size: 14px;
+                font-weight: 500;
             }}
             QLabel[subtle="true"] {{
                 color: {SUBTEXT};
                 font-size: 12px;
+                font-weight: 400;
             }}
             QProgressBar {{
                 background: {APP_BG};
@@ -191,19 +198,23 @@ class ProcessingDialog(QDialog):
                 border-radius: 10px;
                 text-align: center;
                 padding: 3px;
-                height: 20px;
+                height: 24px;
                 color: {TEXT};
+                font-weight: 600;
+                font-size: 13px;
             }}
             QProgressBar::chunk {{
-                background: {ACCENT};
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {ACCENT}, stop:1 {ACCENT_DARK});
                 border-radius: 8px;
             }}
             QPushButton {{
                 background: {ACCENT_DARK};
                 color: white;
                 border: none;
-                padding: 6px 10px;
+                padding: 8px 16px;
                 border-radius: 8px;
+                font-weight: 600;
             }}
             QPushButton:hover {{ background: {ACCENT}; }}
             QPushButton:disabled {{ background: {BORDER}; color: {SUBTEXT}; }}
@@ -216,12 +227,16 @@ class ProcessingDialog(QDialog):
         self.timer.timeout.connect(self._tick)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(10)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(12)
 
-        self.msg = QLabel(message)
+        # Clean header without redundant app name
+        header_text = message if message != "Working…" else "Processing"
+        self.msg = QLabel(header_text)
+        self.msg.setStyleSheet("font-size: 16px; font-weight: 600; color: #4FD1C7;")
         lay.addWidget(self.msg)
 
+        # Progress bar
         self.bar = QProgressBar()
         if total_steps is None:
             # indeterminate: pulse bar
@@ -234,13 +249,19 @@ class ProcessingDialog(QDialog):
             self.bar.setTextVisible(True)
         lay.addWidget(self.bar)
 
+        # Info row with better spacing
         info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        
         self.left_info = QLabel("Starting…")
         self.left_info.setProperty("subtle", True)
+        
         self.right_info = QLabel("00:00")
         self.right_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.right_info.setProperty("subtle", True)
+        
         info_row.addWidget(self.left_info)
+        info_row.addStretch()  # Push time to the right
         info_row.addWidget(self.right_info)
         lay.addLayout(info_row)
 
@@ -257,9 +278,12 @@ class ProcessingDialog(QDialog):
         self.elapsed.start()
         self.timer.start()
 
-        
+        # Add speed tracking for enhanced progress
+        self.start_time = time.time()
+        self.last_progress = 0
+        self.last_time = self.start_time
 
-    # Public API
+    # Public API methods remain the same...
     def set_message(self, text: str):
         self.msg.setText(text)
 
@@ -270,13 +294,28 @@ class ProcessingDialog(QDialog):
         self.bar.setValue(max(0, min(current, self.total_steps)))
         if label is not None:
             self.left_info.setText(label)
+        
+        # Enhanced: Calculate processing speed
+        now = time.time()
+        if now > self.last_time + 1:  # Update every second
+            progress_delta = current - self.last_progress
+            time_delta = now - self.last_time
+            
+            if time_delta > 0 and progress_delta > 0:
+                speed = progress_delta / time_delta
+                # Update the label to show speed
+                if label:
+                    self.left_info.setText(f"{label} • {speed:.1f}/sec")
+            
+            self.last_progress = current
+            self.last_time = now
 
-    def finish(self, final_text: str = "Done"):
+    def finish(self, final_text: str = "Complete"):
         self.left_info.setText(final_text)
         self.timer.stop()
-        self.accept()
+        # Brief delay before closing to show completion
+        QTimer.singleShot(500, self.accept)
 
-    # internal
     def _tick(self):
         ms = self.elapsed.elapsed()
         mm = int(ms // 1000 // 60)
@@ -284,15 +323,11 @@ class ProcessingDialog(QDialog):
         elapsed_txt = f"{mm:02d}:{ss:02d}"
 
         if self.total_steps is None:
-            # busy: bounce elapsed only
             self.right_info.setText(elapsed_txt)
-            if not self.msg.text():
-                self.msg.setText("Working… Please wait.")
         else:
-            # ETA estimate
             cur = max(1, self.bar.value())
             eta = ""
-            rate = cur / max(1, ms / 1000.0)  # steps per sec
+            rate = cur / max(1, ms / 1000.0)
             remain = max(0, self.total_steps - cur)
             if rate > 0.01:
                 eta_s = int(remain / rate)
@@ -300,8 +335,9 @@ class ProcessingDialog(QDialog):
                 eta_ss = eta_s % 60
                 eta = f" • ETA {eta_m:02d}:{eta_ss:02d}"
             self.right_info.setText(elapsed_txt + eta)
+        
 
-
+    
 class VideoViewport(QWidget):
     """
     A paint-on-demand widget that always renders the current frame with
@@ -2009,95 +2045,139 @@ root.addWidget(card_detect)
     def set_export_progress(self, pct: int):
         if hasattr(self, "_dlg_export"): self._dlg_export.set_progress(pct); QApplication.processEvents()
 
-    def finish_export_progress(self):
+    def finish_export_progress(self, success=True):
+        """Finish export progress dialog"""
         if hasattr(self, "_dlg_export"):
             self._dlg_export.set_progress(100)
-            self._dlg_export.close(); del self._dlg_export
+            if success:
+                self._dlg_export.set_text("Export complete")
+            else:
+                self._dlg_export.set_text("Export failed")
+                
+            QTimer.singleShot(300, lambda: (
+                self._dlg_export.close() if hasattr(self, "_dlg_export") else None,
+                delattr(self, "_dlg_export") if hasattr(self, "_dlg_export") else None
+            ))
 
     # ---- Blur (determinate; reuse same pattern)
+    # view.py (inside class EditorPanel)
+
     def start_blur_progress(self):
-        self._dlg_blur = PrettyProgress("Processing – StopFilmingMe", "Blurring person in video…", self, determinate=True)
-        self._dlg_blur.show(); QApplication.processEvents()
+        # Same look & behavior as Detecting…
+        self._dlg_blur = ProcessingDialog(
+            parent=self,
+            title="Processing",
+            message="Blurring person in video…",
+            total_steps=100,          # determinate bar (0..100)
+            allow_cancel=False
+        )
+        self._dlg_blur.show()
+        QApplication.processEvents()
 
-    def set_blur_progress(self, pct:int):
-        if hasattr(self, "_dlg_blur"): self._dlg_blur.set_progress(pct); QApplication.processEvents()
+    def set_blur_progress(self, pct: int):
+        if hasattr(self, "_dlg_blur") and self._dlg_blur:
+            self._dlg_blur.set_progress(int(max(0, min(100, pct))))
+            QApplication.processEvents()
 
-    def finish_blur_progress(self):
-        if hasattr(self, "_dlg_blur"):
-            self._dlg_blur.set_progress(100)
-            self._dlg_blur.close(); del self._dlg_blur
+    def finish_blur_progress(self, success: bool = True):
+        if hasattr(self, "_dlg_blur") and self._dlg_blur:
+            try:
+                self._dlg_blur.finish("Complete" if success else "Failed")
+            finally:
+                self._dlg_blur = None
+
+
 
 
 
 class PrettyProgress(QDialog):
-    """Unified themed progress dialog with header, subtext, bar, and elapsed/ETA."""
+    """Unified themed progress dialog with clean, modern styling."""
     def __init__(self, title="Processing", text="Please wait…", parent=None, determinate=False):
         super().__init__(parent)
-        self.setWindowTitle(title)
+        
+        # Fix: Clean up title
+        clean_title = title.replace("StopFilming", "").replace("–", "").strip()
+        if not clean_title:
+            clean_title = "StopFilming"
+            
+        self.setWindowTitle(clean_title)
         self.setModal(True)
         self.setFixedWidth(460)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
-        # ---- Layout
-        v = QVBoxLayout(self); v.setContentsMargins(16,16,16,16); v.setSpacing(10)
+        # Layout
+        v = QVBoxLayout(self)
+        v.setContentsMargins(20, 20, 20, 20)
+        v.setSpacing(12)
 
-        self.header = QLabel(title); self.header.setStyleSheet("color:#E2E8F0; font-weight:700; font-size:14px;")
+        # Clean header
+        self.header = QLabel(text)
+        self.header.setStyleSheet("""
+            color: #4FD1C7; 
+            font-weight: 600; 
+            font-size: 16px;
+            margin-bottom: 4px;
+        """)
         v.addWidget(self.header)
 
-        self.sub = QLabel(text); self.sub.setStyleSheet("color:#A0AEC0;")
-        v.addWidget(self.sub)
+        # Progress bar
+        self.bar = QProgressBar()
+        self.bar.setMinimumHeight(24)
+        v.addWidget(self.bar)
 
-        self.bar = QProgressBar(); v.addWidget(self.bar)
-        self.bar.setTextVisible(True)
-        self.bar.setFormat("%p%")
-
-        # elapsed / eta line
-        self.time_lbl = QLabel("00:00"); self.time_lbl.setAlignment(Qt.AlignRight)
-        self.time_lbl.setStyleSheet("color:#A0AEC0;")
+        # Time display
+        self.time_lbl = QLabel("00:00")
+        self.time_lbl.setAlignment(Qt.AlignRight)
+        self.time_lbl.setStyleSheet("color: #A0AEC0; font-size: 12px;")
         v.addWidget(self.time_lbl)
 
-        # ---- Style
+        # Style
         self.setStyleSheet("""
-            QDialog { background:#2D3748; border:1px solid #4A5568; border-radius:8px; }
+            QDialog { 
+                background: #2D3748; 
+                border: 1px solid #4A5568; 
+                border-radius: 12px; 
+            }
             QProgressBar {
-                height:18px; border:1px solid #4A5568; border-radius:6px;
-                background:#1A202C; text-align:center; color:#E2E8F0;
+                height: 24px; 
+                border: 1px solid #4A5568; 
+                border-radius: 8px;
+                background: #1A202C; 
+                text-align: center; 
+                color: #E2E8F0;
+                font-weight: 600;
             }
             QProgressBar::chunk {
-                border-radius:6px;
-                background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #4FD1C7, stop:1 #38B2AC);
+                border-radius: 6px;
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, 
+                    stop:0 #4FD1C7, stop:1 #38B2AC);
             }
         """)
 
-        # ---- Mode
+        # Mode setup
         self.determinate = determinate
         if determinate:
             self.bar.setRange(0, 100)
             self.bar.setTextVisible(True)
+            self.bar.setFormat("%p%")
         else:
-            # manual marquee so it always moves (works with custom styles)
             self.bar.setRange(0, 100)
-            self.bar.setTextVisible(False)   # hide “0%”
+            self.bar.setTextVisible(False)
             self._pct = 0
             self._spin = QTimer(self)
             self._spin.timeout.connect(self._tick)
-            self._spin.start(30)  
+            self._spin.start(30)
 
-        # timers for elapsed/eta
-        self._start_ms = int(QApplication.instance().arguments() is not None)  # dummy to keep type checkers happy
-        self._start_ms = QTimer().remainingTime()  # not used; we’ll just grab time()
-        self._t = QTimer(self); self._t.timeout.connect(self._update_time); self._t.start(250)
-        import time as _t; self._since = _t.time()
-        self._pct = 0
+        # Timer for elapsed time
+        self._t = QTimer(self)
+        self._t.timeout.connect(self._update_time)
+        self._t.start(250)
+        import time as _t
+        self._since = _t.time()
 
     def _tick(self):
         self._pct = (self._pct + 2) % 101
         self.bar.setValue(self._pct)
-
-    def closeEvent(self, e):
-        if hasattr(self, "_spin"): self._spin.stop()
-        super().closeEvent(e)
-
 
     def _update_time(self):
         import time
@@ -2105,13 +2185,32 @@ class PrettyProgress(QDialog):
         mm, ss = divmod(elapsed, 60)
         self.time_lbl.setText(f"{mm:02d}:{ss:02d}")
 
-    
-    # Public API
-    def set_text(self, text): self.sub.setText(text)
-    def set_title(self, title): self.header.setText(title); self.setWindowTitle(title)
+    def set_text(self, text):
+        self.header.setText(text)
+
+    def set_title(self, title):
+        clean_title = title.replace("StopFilming", "").replace("–", "").strip()
+        if not clean_title:
+            clean_title = "StopFilming"
+        self.header.setText(clean_title)
+        self.setWindowTitle(clean_title)
+
     def set_progress(self, pct: int):
         if self.determinate:
             self.bar.setValue(max(0, min(100, int(pct))))
+
+    def closeEvent(self, e):
+        if hasattr(self, "_spin"):
+            self._spin.stop()
+        if hasattr(self, "_t"):
+            self._t.stop()
+        super().closeEvent(e)
+
+    def _update_time(self):
+        import time
+        elapsed = int(time.time() - self._since)
+        mm, ss = divmod(elapsed, 60)
+        self.time_lbl.setText(f"{mm:02d}:{ss:02d}")
 
     def on_export(self,panel, core, out_path):
         self.panel.start_export_progress()
