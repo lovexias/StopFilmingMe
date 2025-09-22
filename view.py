@@ -1,4 +1,4 @@
-# ──── Enhanced Video Editor Interface ──────────────────────────────────────────────────────
+# ──── Enhanced Video Editor Interface ─────────────────────────────────────────────────────────────────────
 import time
 import cv2
 import numpy as np
@@ -28,13 +28,21 @@ from PyQt5.QtCore import QUrl
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 
-APP_BG = "#0f172a"      # slate-900
-CARD_BG = "#111827"     # near-black card
-TEXT    = "#e5e7eb"     # slate-200
-SUBTEXT = "#9ca3af"     # slate-400
-ACCENT  = "#14b8a6"     # teal-500
-ACCENT_DARK = "#0d9488" # teal-600
-BORDER  = "#1f2937"     # slate-800
+# Premiere Pro Style Colors - Professional Dark Theme
+APP_BG = "#1e1e1e"         # Main background (darker)
+PANEL_BG = "#232323"       # Panel backgrounds
+CARD_BG = "#2a2a2a"        # Card/section backgrounds  
+DARKER_BG = "#1a1a1a"      # Darker elements
+TEXT = "#d4d4d4"           # Primary text (lighter)
+SUBTEXT = "#969696"        # Secondary text
+ACCENT = "#0078d4"         # Blue accent (Premiere style)
+ACCENT_HOVER = "#106ebe"   # Hover state
+ACCENT_LIGHT = "#40a6ff"   # Light accent
+BORDER = "#404040"         # Borders
+BORDER_LIGHT = "#505050"   # Lighter borders
+SUCCESS = "#00d084"        # Success/positive
+WARNING = "#ffb900"        # Warning
+DANGER = "#d13438"         # Error/danger
 
 
 class ExportDialog(QDialog):
@@ -42,37 +50,88 @@ class ExportDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Export Video")
         self.setModal(True)
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(540)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
-        self.setStyleSheet("""
-            QDialog { background:#111827; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; }
-            QLabel  { color:#e5e7eb; }
-            QLineEdit, QComboBox {
-                background:#0f172a; color:#e5e7eb; border:1px solid #1f2937; border-radius:8px; padding:6px 8px;
-            }
-            QSlider::groove:horizontal { height:8px; border-radius:4px; background:#1f2937; }
-            QSlider::sub-page:horizontal { background:#14b8a6; border-radius:4px; }
-            QSlider::handle:horizontal { background:#14b8a6; width:18px; height:18px; margin:-6px 0; border-radius:9px; }
-            QPushButton { background:#0d9488; color:white; border:none; border-radius:8px; padding:8px 14px; }
-            QPushButton:hover { background:#14b8a6; }
+        self.setStyleSheet(f"""
+            QDialog {{ 
+                background: {PANEL_BG}; 
+                color: {TEXT}; 
+                border: 1px solid {BORDER}; 
+                border-radius: 8px;
+                font-family: 'Segoe UI', Tahoma, sans-serif;
+            }}
+            QLabel {{ 
+                color: {TEXT}; 
+                font-size: 13px;
+                font-weight: 500;
+            }}
+            QLineEdit, QComboBox {{
+                background: {DARKER_BG}; 
+                color: {TEXT}; 
+                border: 1px solid {BORDER}; 
+                border-radius: 4px; 
+                padding: 8px 10px;
+                font-size: 13px;
+                selection-background-color: {ACCENT};
+            }}
+            QLineEdit:focus, QComboBox:focus {{
+                border-color: {ACCENT};
+                background: {APP_BG};
+            }}
+            QSlider::groove:horizontal {{ 
+                height: 4px; 
+                border-radius: 2px; 
+                background: {BORDER}; 
+            }}
+            QSlider::sub-page:horizontal {{ 
+                background: {ACCENT}; 
+                border-radius: 2px; 
+            }}
+            QSlider::handle:horizontal {{ 
+                background: {ACCENT}; 
+                width: 16px; 
+                height: 16px; 
+                margin: -6px 0; 
+                border-radius: 8px;
+                border: 2px solid {PANEL_BG};
+            }}
+            QSlider::handle:horizontal:hover {{ 
+                background: {ACCENT_HOVER}; 
+            }}
+            QPushButton {{ 
+                background: {ACCENT}; 
+                color: white; 
+                border: none; 
+                border-radius: 4px; 
+                padding: 10px 18px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ 
+                background: {ACCENT_HOVER}; 
+            }}
+            QPushButton:pressed {{ 
+                background: {ACCENT}; 
+                transform: translateY(1px);
+            }}
         """)
 
-        v = QVBoxLayout(self); v.setContentsMargins(16,16,16,16); v.setSpacing(10)
+        v = QVBoxLayout(self); v.setContentsMargins(24,20,24,20); v.setSpacing(16)
 
         # Destination folder + filename
         row_path = QHBoxLayout()
         self.dir_edit = QLineEdit(suggest_dir or os.path.expanduser("~"))
-        btn_browse = QPushButton("Browse…")
+        btn_browse = QPushButton("Browse...")
         btn_browse.clicked.connect(self._pick_folder)
-        row_path.addWidget(QLabel("Folder"))
+        row_path.addWidget(QLabel("Output Folder"))
         row_path.addWidget(self.dir_edit, 1)
         row_path.addWidget(btn_browse)
         v.addLayout(row_path)
 
         row_name = QHBoxLayout()
         self.name_edit = QLineEdit(suggest_name)
-        row_name.addWidget(QLabel("File name"))
+        row_name.addWidget(QLabel("File Name"))
         row_name.addWidget(self.name_edit, 1)
         v.addLayout(row_name)
 
@@ -105,6 +164,7 @@ class ExportDialog(QDialog):
         self.quality_mbps.setRange(2, 50)  # 2–50 Mbps
         self.quality_mbps.setValue(12)
         self.quality_label = QLabel("12 Mbps")
+        self.quality_label.setStyleSheet(f"color: {ACCENT}; font-weight: 600;")
         self.quality_mbps.valueChanged.connect(lambda v_: self.quality_label.setText(f"{v_} Mbps"))
         row_q.addWidget(QLabel("Bitrate"))
         row_q.addWidget(self.quality_mbps, 1)
@@ -127,10 +187,23 @@ class ExportDialog(QDialog):
         # Buttons
         row_btns = QHBoxLayout()
         row_btns.addStretch(1)
-        btn_cancel = QPushButton("Cancel"); btn_cancel.clicked.connect(self.reject)
-        btn_ok = QPushButton("Export"); btn_ok.clicked.connect(self.accept)
-        row_btns.addWidget(btn_cancel); row_btns.addWidget(btn_ok)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background: {BORDER};
+                color: {TEXT};
+            }}
+            QPushButton:hover {{
+                background: {BORDER_LIGHT};
+            }}
+        """)
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok = QPushButton("Export")
+        row_btns.addWidget(btn_cancel)
+        row_btns.addWidget(btn_ok)
         v.addLayout(row_btns)
+
+        btn_ok.clicked.connect(self.accept)
 
     def _refresh_codecs(self):
         self.codec_box.clear()
@@ -157,16 +230,16 @@ class ExportDialog(QDialog):
         }
 
 
-class ProcessingDialog(QDialog):  # Keep the same name!
+class ProcessingDialog(QDialog):
     """
-    Enhanced progress dialog with better visual feedback - keeping original name
+    Enhanced progress dialog with Premiere Pro styling
     """
     def __init__(self, parent, title="Processing", message="Working...", total_steps=None, allow_cancel=False):
         super().__init__(parent)
         # Fix: Clean up the title to avoid repetition
-        clean_title = title.replace("StopFilming", "").replace("—", "").strip()
+        clean_title = title.replace("StopFilming", "").replace("–", "").strip()
         if not clean_title or clean_title == "Processing":
-            clean_title = "StopFilming"
+            clean_title = "StopFilming Pro"
         
         self.setWindowTitle(clean_title)
         self.setModal(True)
@@ -174,13 +247,14 @@ class ProcessingDialog(QDialog):  # Keep the same name!
         self.setMaximumWidth(500)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
-        # Stylesheet (rounded bar, accent chunk, dark bg)
+        # Premiere Pro style progress dialog
         self.setStyleSheet(f"""
             QDialog {{
-                background: {CARD_BG};
+                background: {PANEL_BG};
                 color: {TEXT};
                 border: 1px solid {BORDER};
-                border-radius: 12px;
+                border-radius: 6px;
+                font-family: 'Segoe UI', Tahoma, sans-serif;
             }}
             QLabel {{
                 color: {TEXT};
@@ -193,31 +267,37 @@ class ProcessingDialog(QDialog):  # Keep the same name!
                 font-weight: 400;
             }}
             QProgressBar {{
-                background: {APP_BG};
+                background: {DARKER_BG};
                 border: 1px solid {BORDER};
-                border-radius: 10px;
+                border-radius: 3px;
                 text-align: center;
-                padding: 3px;
-                height: 24px;
+                padding: 2px;
+                height: 20px;
                 color: {TEXT};
-                font-weight: 600;
-                font-size: 13px;
+                font-weight: 500;
+                font-size: 12px;
             }}
             QProgressBar::chunk {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {ACCENT}, stop:1 {ACCENT_DARK});
-                border-radius: 8px;
+                    stop:0 {ACCENT}, stop:1 {ACCENT_LIGHT});
+                border-radius: 2px;
             }}
             QPushButton {{
-                background: {ACCENT_DARK};
+                background: {ACCENT};
                 color: white;
                 border: none;
                 padding: 8px 16px;
-                border-radius: 8px;
+                border-radius: 4px;
                 font-weight: 600;
+                font-size: 13px;
             }}
-            QPushButton:hover {{ background: {ACCENT}; }}
-            QPushButton:disabled {{ background: {BORDER}; color: {SUBTEXT}; }}
+            QPushButton:hover {{ 
+                background: {ACCENT_HOVER}; 
+            }}
+            QPushButton:disabled {{ 
+                background: {BORDER}; 
+                color: {SUBTEXT}; 
+            }}
         """)
 
         self.total_steps = total_steps
@@ -233,7 +313,7 @@ class ProcessingDialog(QDialog):  # Keep the same name!
         # Clean header without redundant app name
         header_text = message if message != "Working…" else "Processing"
         self.msg = QLabel(header_text)
-        self.msg.setStyleSheet("font-size: 16px; font-weight: 600; color: #4FD1C7;")
+        self.msg.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {ACCENT_LIGHT};")
         lay.addWidget(self.msg)
 
         # Progress bar
@@ -387,8 +467,8 @@ class VideoViewport(QWidget):
             p = QPainter(self)
             p.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-            # Fill background (letterbox areas)
-            p.fillRect(self.rect(), QColor("#1A202C"))
+            # Fill background (letterbox areas) - Premiere Pro dark
+            p.fillRect(self.rect(), QColor(APP_BG))
 
             # Safety checks to prevent access violation
             if not self._qimg or self._qimg is None:
@@ -438,108 +518,172 @@ class VideoViewport(QWidget):
                 p.end()
             except:
                 pass
+
+
 class CardSection(QFrame):
     """
-    Reusable inspector card with teal header and a sunken inner panel.
-    Matches the look of your right-side cards (Video / Detection / Blur / Selection).
+    Professional Premiere Pro style cards with subtle borders and shadows
     """
     def __init__(self, title_text: str, parent=None):
         super().__init__(parent)
         self.setObjectName("sfCard")
-        self.setStyleSheet("""
-            QFrame#sfCard {
-                background: #0f1216;               /* card surface */
-                border: 1px solid #2b3037;         /* stroke */
-                border-radius: 12px;
-            }
-            QFrame#sfInner {
-                background: #11151b;               /* sunken inner */
-                border: 1px solid #242a32;
-                border-radius: 10px;
-            }
-            QLabel#sfTitle {
-                color: #2dd4bf;                    /* teal title */
-                font-weight: 700;
-                font-size: 14px;
-            }
-            QLabel#sfField {
-                color: #e6eaf0;
+        self.setStyleSheet(f"""
+            QFrame#sfCard {{
+                background: {CARD_BG};               
+                border: 1px solid {BORDER};         
+                border-radius: 6px;
+                margin: 2px;
+            }}
+            QFrame#sfInner {{
+                background: {PANEL_BG};               
+                border: 1px solid {BORDER};
+                border-radius: 4px;
+            }}
+            QLabel#sfTitle {{
+                color: {ACCENT_LIGHT};                    
+                font-weight: 600;
+                font-size: 13px;
+                font-family: 'Segoe UI', Tahoma, sans-serif;
+            }}
+            QLabel#sfField {{
+                color: {TEXT};
+                font-weight: 500;
+                font-size: 12px;
+            }}
+            QLabel#sfPill {{
+                background: {DARKER_BG};
+                color: {ACCENT_LIGHT};
+                border: 1px solid {BORDER};
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-width: 40px;
                 font-weight: 600;
                 font-size: 12px;
-            }
-            QLabel#sfPill {
-                background: #171a1f;
-                color: #aab3c2;
-                border: 1px solid #2b3037;
-                border-radius: 8px;
-                padding: 6px 10px;
-                min-width: 48px;
                 qproperty-alignment: AlignCenter;
-            }
-            QRadioButton { color: #e6eaf0; }
-            QSlider::groove:horizontal {
-                background: #171a1f; height: 6px; border-radius: 3px;
-                border: 1px solid #2b3037;
-            }
-            QSlider::sub-page:horizontal { background: #2dd4bf; border-radius: 3px; }
-            QSlider::handle:horizontal {
-                background: #2dd4bf; width: 18px; height: 18px;
-                border: 2px solid #0f1216; border-radius: 9px; margin: -7px 0;
-            }
-            QListWidget {
-                background: #0f1216;
-                border: 1px solid #2b3037;
-                border-radius: 10px;
-                padding: 8px;
-                color: #e6eaf0;
-            }
-            QListWidget::item {
-                padding: 10px;
-                border-bottom: 1px solid #242a32;
-                border-radius: 6px;
-                margin: 2px 0;
-            }
-            QListWidget::item:selected {
-                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #2dd4bf, stop:1 #14b8a6);
-                color: #0b0d11;
-            }
-            QListWidget::item:hover { background: #111b24; }
+            }}
+            QRadioButton {{ 
+                color: {TEXT}; 
+                font-size: 12px;
+                spacing: 8px;
+            }}
+            QRadioButton::indicator {{
+                width: 14px;
+                height: 14px;
+            }}
+            QRadioButton::indicator:unchecked {{
+                border: 2px solid {BORDER};
+                border-radius: 7px;
+                background: {DARKER_BG};
+            }}
+            QRadioButton::indicator:checked {{
+                border: 2px solid {ACCENT};
+                border-radius: 7px;
+                background: {ACCENT};
+            }}
+            QSlider::groove:horizontal {{
+                background: {BORDER}; 
+                height: 4px; 
+                border-radius: 2px;
+            }}
+            QSlider::sub-page:horizontal {{ 
+                background: {ACCENT}; 
+                border-radius: 2px; 
+            }}
+            QSlider::handle:horizontal {{
+                background: {ACCENT}; 
+                width: 14px; 
+                height: 14px;
+                border: 2px solid {PANEL_BG}; 
+                border-radius: 7px; 
+                margin: -5px 0;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: {ACCENT_HOVER};
+            }}
+            QListWidget {{
+                background: {DARKER_BG};
+                border: 1px solid {BORDER};
+                border-radius: 4px;
+                padding: 4px;
+                color: {TEXT};
+                selection-background-color: {ACCENT};
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 8px 10px;
+                border-bottom: 1px solid {BORDER};
+                border-radius: 3px;
+                margin: 1px 0;
+                color: {TEXT};
+            }}
+            QListWidget::item:selected {{
+                background: {ACCENT};
+                color: white;
+            }}
+            QListWidget::item:hover:!selected {{ 
+                background: {BORDER}; 
+            }}
+            QSpinBox {{
+                background: {DARKER_BG}; 
+                color: {TEXT}; 
+                border: 1px solid {BORDER};
+                border-radius: 4px; 
+                padding: 4px 8px; 
+                min-width: 50px;
+                font-size: 12px;
+            }}
+            QSpinBox:focus {{
+                border-color: {ACCENT};
+            }}
+            QSpinBox::down-button, QSpinBox::up-button {{ 
+                width: 14px; 
+                background: {BORDER};
+                border: none;
+            }}
+            QSpinBox::down-button:hover, QSpinBox::up-button:hover {{ 
+                background: {BORDER_LIGHT}; 
+            }}
         """)
+        
+        # Add subtle shadow
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(8)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        shadow.setOffset(0, 2)
+        self.setGraphicsEffect(shadow)
+        
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(10)
+        outer.setContentsMargins(12, 10, 12, 12)
+        outer.setSpacing(8)
 
         self.title = QLabel(title_text); self.title.setObjectName("sfTitle")
         outer.addWidget(self.title)
 
         self.inner = QFrame(self); self.inner.setObjectName("sfInner")
         self.inner_lay = QVBoxLayout(self.inner)
-        self.inner_lay.setContentsMargins(14, 14, 14, 14)
-        self.inner_lay.setSpacing(10)
+        self.inner_lay.setContentsMargins(12, 10, 12, 10)
+        self.inner_lay.setSpacing(8)
         outer.addWidget(self.inner)
 
     def add_row(self, left_widget: QWidget, right_widget: QWidget = None):
-        row = QHBoxLayout(); row.setSpacing(10)
+        row = QHBoxLayout(); row.setSpacing(8)
         row.addWidget(left_widget)
         if right_widget is not None:
             row.addWidget(right_widget, 1)
         self.inner_lay.addLayout(row)
         return row
 
-    def add_label_value(self, label_text: str, value_text: str = "—"):
+    def add_label_value(self, label_text: str, value_text: str = "–"):
         lab = QLabel(label_text); lab.setObjectName("sfField")
         pill = QLabel(value_text); pill.setObjectName("sfPill")
-        row = QHBoxLayout(); row.setSpacing(10)
+        row = QHBoxLayout(); row.setSpacing(8)
         row.addWidget(lab); row.addWidget(pill, 1, Qt.AlignRight)
         self.inner_lay.addLayout(row)
         return pill
 
 
-
-
 class ModernTitleBar(QWidget):
-    """Custom title bar with window controls and modern styling"""
+    """Custom title bar with Premiere Pro styling"""
     
     minimizeClicked = pyqtSignal()
     maximizeClicked = pyqtSignal()
@@ -547,37 +691,36 @@ class ModernTitleBar(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(40)
-        self.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4A5568, stop:1 #2D3748);
-                border-bottom: 1px solid #1A202C;
-            }
+        self.setFixedHeight(32)
+        self.setStyleSheet(f"""
+            QWidget {{
+                background: {PANEL_BG};
+                border-bottom: 1px solid {BORDER};
+            }}
         """)
         
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(15, 0, 5, 0)
+        layout.setContentsMargins(12, 0, 4, 0)
         layout.setSpacing(0)
         
         # App title
-        self.title_label = QLabel("Video Gesture Editor")
-        f = QFont("Segoe UI", 14, QFont.Bold)
+        self.title_label = QLabel("StopFilming Pro")
+        f = QFont("Segoe UI", 13, QFont.Normal)
         self.title_label.setFont(f)
-        self.title_label.setStyleSheet("""
-            color: #E2E8F0;
-            font-size: 14px;
-            font-weight: 600;
-            padding: 0 10px;
+        self.title_label.setStyleSheet(f"""
+            color: {TEXT};
+            font-size: 13px;
+            font-weight: 500;
+            padding: 0 8px;
         """)
         layout.addWidget(self.title_label)
         
         layout.addStretch()
         
         # Window controls
-        self.minimize_btn = self.create_window_button("─", "#4A5568", "#5A6578")
-        self.maximize_btn = self.create_window_button("□", "#4A5568", "#5A6578")
-        self.close_btn = self.create_window_button("×", "#E53E3E", "#C53030")
+        self.minimize_btn = self.create_window_button("−", PANEL_BG, BORDER)
+        self.maximize_btn = self.create_window_button("□", PANEL_BG, BORDER)
+        self.close_btn = self.create_window_button("×", PANEL_BG, DANGER)
         
         self.minimize_btn.clicked.connect(self.minimizeClicked.emit)
         self.maximize_btn.clicked.connect(self.maximizeClicked.emit)
@@ -589,16 +732,16 @@ class ModernTitleBar(QWidget):
     
     def create_window_button(self, text, bg_color, hover_color):
         btn = QPushButton(text)
-        btn.setFixedSize(35, 30)
+        btn.setFixedSize(32, 28)
         btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {bg_color};
-                color: white;
+                color: {TEXT};
                 border: none;
-                font-size: 16px;
+                font-size: 14px;
                 font-weight: bold;
-                margin: 2px;
-                border-radius: 4px;
+                margin: 2px 1px;
+                border-radius: 2px;
             }}
             QPushButton:hover {{
                 background-color: {hover_color};
@@ -611,23 +754,24 @@ class ModernTitleBar(QWidget):
 
 
 class EnhancedTimeRuler(QWidget):
-    """Enhanced time ruler with gradient background and smooth animations"""
+    """Premiere Pro style timeline ruler"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.total_frames = 0
         self.fps = 30.0
         self.current_frame = 0
-        self.setMinimumHeight(35)
+        self.setMinimumHeight(28)
         self.setAttribute(Qt.WA_TranslucentBackground)
-
         
-        # Add drop shadow
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(10)
-        shadow.setColor(QColor(0, 0, 0, 80))
-        shadow.setOffset(0, 2)
-        self.setGraphicsEffect(shadow)
+        # Premiere Pro style background
+        self.setStyleSheet(f"""
+            QWidget {{
+                background: {PANEL_BG};
+                border-top: 1px solid {BORDER};
+                border-bottom: 1px solid {BORDER};
+            }}
+        """)
 
     def setVideoInfo(self, total_frames: int, fps: float):
         self.total_frames = total_frames
@@ -646,11 +790,8 @@ class EnhancedTimeRuler(QWidget):
         w = self.width()
         h = self.height()
         
-        # Gradient background
-        gradient = QLinearGradient(0, 0, 0, h)
-        gradient.setColorAt(0, QColor("#2D3748"))
-        gradient.setColorAt(1, QColor("#1A202C"))
-        painter.fillRect(0, 0, w, h, gradient)
+        # Professional background
+        painter.fillRect(0, 0, w, h, QColor(PANEL_BG))
         
         if self.total_frames <= 0 or self.fps <= 0:
             return
@@ -663,9 +804,9 @@ class EnhancedTimeRuler(QWidget):
             
         interval_sec = total_seconds / num_ticks
 
-        # Draw tick marks and labels
-        painter.setPen(QPen(QColor("#A0AEC0"), 1))
-        font = QFont("Arial", 8)
+        # Draw tick marks and labels (Premiere style)
+        painter.setPen(QPen(QColor(BORDER_LIGHT), 1))
+        font = QFont("Segoe UI", 10, QFont.Normal)
         painter.setFont(font)
         
         for i in range(num_ticks + 1):
@@ -673,7 +814,7 @@ class EnhancedTimeRuler(QWidget):
             x = int((sec / total_seconds) * w)
             
             # Major tick
-            painter.drawLine(x, h - 12, x, h)
+            painter.drawLine(x, h - 8, x, h)
             
             # Time label
             mm = int(sec // 60)
@@ -682,175 +823,170 @@ class EnhancedTimeRuler(QWidget):
             
             fm = QFontMetrics(font)
             text_width = fm.width(label)
-            painter.setPen(QColor("#E2E8F0"))
-            painter.drawText(x - text_width // 2, h - 15, label)
-            painter.setPen(QPen(QColor("#A0AEC0"), 1))
+            painter.setPen(QColor(TEXT))
+            painter.drawText(x - text_width // 2, h - 12, label)
+            painter.setPen(QPen(QColor(BORDER_LIGHT), 1))
 
-        # Current position indicator
+        # Current position indicator (Premiere blue)
         cur_sec = self.current_frame / self.fps
         if cur_sec > total_seconds:
             cur_sec = total_seconds
         x_cur = int((cur_sec / total_seconds) * w)
         x_cur = max(0, min(x_cur, w))
 
-        # Draw current position with glow effect
-        painter.setPen(QPen(QColor("#4FD1C7"), 3))
+        # Draw current position with Premiere style
+        painter.setPen(QPen(QColor(ACCENT), 2))
         painter.drawLine(x_cur, 0, x_cur, h)
         
-        # Draw triangle indicator
+        # Draw playhead triangle
         triangle = QPolygon([
-            QPoint(x_cur - 6, 0),
-            QPoint(x_cur + 6, 0),
-            QPoint(x_cur, 12)
+            QPoint(x_cur - 4, 0),
+            QPoint(x_cur + 4, 0),
+            QPoint(x_cur, 8)
         ])
 
-        painter.setBrush(QBrush(QColor("#4FD1C7")))
-        painter.setPen(QPen(QColor("#38B2AC"), 2))
+        painter.setBrush(QBrush(QColor(ACCENT)))
+        painter.setPen(QPen(QColor(ACCENT), 1))
         painter.drawPolygon(triangle)
 
 
 class ModernButton(QPushButton):
-    """Enhanced button with modern styling and hover effects"""
+    """Premiere Pro style button with professional theming"""
     
     def __init__(self, text, button_type="primary", parent=None):
         super().__init__(text, parent)
         self.button_type = button_type
-        self.setFixedHeight(36)
+        self.setFixedHeight(32)
         self.setCursor(QCursor(Qt.PointingHandCursor))
         self.apply_style()
         
-        # Add drop shadow
+        # Subtle shadow
         shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(8)
-        shadow.setColor(QColor(0, 0, 0, 60))
-        shadow.setOffset(0, 2)
+        shadow.setBlurRadius(6)
+        shadow.setColor(QColor(0, 0, 0, 30))
+        shadow.setOffset(0, 1)
         self.setGraphicsEffect(shadow)
     
     def apply_style(self):
         if self.button_type == "primary":
-            self.setStyleSheet("""
-                QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #4299E1, stop:1 #3182CE);
+            self.setStyleSheet(f"""
+                QPushButton {{
+                    background: {ACCENT};
                     color: white;
-                    border: none;
-                    border-radius: 8px;
-                    padding: 8px 16px;
-                    font-size: 13px;
+                    border: 1px solid {ACCENT};
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
                     font-weight: 600;
-                    min-width: 80px;
-                }
-                QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #4FD1C7, stop:1 #38B2AC);
-                }
-                QPushButton:pressed {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #2C5282, stop:1 #2A4A6B);
-                }
-                QPushButton:disabled {
-                    background: #4A5568;
-                    color: #A0AEC0;
-                }
+                    font-family: 'Segoe UI', Tahoma, sans-serif;
+                    min-width: 70px;
+                }}
+                QPushButton:hover {{
+                    background: {ACCENT_HOVER};
+                    border-color: {ACCENT_HOVER};
+                }}
+                QPushButton:pressed {{
+                    background: {ACCENT};
+                    transform: translateY(1px);
+                }}
+                QPushButton:disabled {{
+                    background: {BORDER};
+                    color: {SUBTEXT};
+                    border-color: {BORDER};
+                }}
             """)
         elif self.button_type == "secondary":
-            self.setStyleSheet("""
-                QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #4A5568, stop:1 #2D3748);
-                    color: #E2E8F0;
-                    border: 1px solid #718096;
-                    border-radius: 8px;
-                    padding: 8px 16px;
-                    font-size: 13px;
-                    font-weight: 600;
-                    min-width: 80px;
-                }
-                QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #718096, stop:1 #4A5568);
-                    border-color: #A0AEC0;
-                }
-                QPushButton:pressed {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #2D3748, stop:1 #1A202C);
-                }
-                QPushButton:disabled {
-                    background: #2D3748;
-                    color: #718096;
-                    border-color: #4A5568;
-                }
+            self.setStyleSheet(f"""
+                QPushButton {{
+                    background: {PANEL_BG};
+                    color: {TEXT};
+                    border: 1px solid {BORDER};
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
+                    font-weight: 500;
+                    font-family: 'Segoe UI', Tahoma, sans-serif;
+                    min-width: 70px;
+                }}
+                QPushButton:hover {{
+                    background: {BORDER};
+                    border-color: {BORDER_LIGHT};
+                }}
+                QPushButton:pressed {{
+                    background: {DARKER_BG};
+                    transform: translateY(1px);
+                }}
+                QPushButton:disabled {{
+                    background: {DARKER_BG};
+                    color: {SUBTEXT};
+                    border-color: {BORDER};
+                }}
             """)
         elif self.button_type == "danger":
-            self.setStyleSheet("""
-                QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #F56565, stop:1 #E53E3E);
+            self.setStyleSheet(f"""
+                QPushButton {{
+                    background: {DANGER};
                     color: white;
-                    border: none;
-                    border-radius: 8px;
-                    padding: 8px 16px;
-                    font-size: 13px;
+                    border: 1px solid {DANGER};
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-size: 12px;
                     font-weight: 600;
-                    min-width: 80px;
-                }
-                QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #FC8181, stop:1 #F56565);
-                }
-                QPushButton:pressed {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #C53030, stop:1 #9C1A1A);
-                }
-                QPushButton:disabled {
-                    background: #4A5568;
-                    color: #A0AEC0;
-                }
+                    font-family: 'Segoe UI', Tahoma, sans-serif;
+                    min-width: 70px;
+                }}
+                QPushButton:hover {{
+                    background: #e63946;
+                    border-color: #e63946;
+                }}
+                QPushButton:pressed {{
+                    background: {DANGER};
+                    transform: translateY(1px);
+                }}
+                QPushButton:disabled {{
+                    background: {BORDER};
+                    color: {SUBTEXT};
+                }}
             """)
 
 
 class ModernSlider(QSlider):
-    """Enhanced slider with modern styling"""
+    """Premiere Pro style slider"""
     
     def __init__(self, orientation=Qt.Horizontal, parent=None):
         super().__init__(orientation, parent)
-        self.setStyleSheet("""
-            QSlider::groove:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2D3748, stop:1 #1A202C);
-                height: 8px;
-                border-radius: 4px;
-                border: 1px solid #4A5568;
-            }
-            QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4FD1C7, stop:1 #38B2AC);
-                border: 2px solid #2D3748;
-                width: 20px;
-                height: 20px;
-                margin: -7px 0;
-                border-radius: 12px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #68D391, stop:1 #48BB78);
-            }
-            QSlider::handle:horizontal:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #38B2AC, stop:1 #319795);
-            }
-            QSlider::sub-page:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4FD1C7, stop:1 #38B2AC);
-                border-radius: 4px;
-            }
+        self.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                background: {BORDER};
+                height: 4px;
+                border-radius: 2px;
+                border: none;
+            }}
+            QSlider::handle:horizontal {{
+                background: {ACCENT};
+                border: 2px solid {PANEL_BG};
+                width: 16px;
+                height: 16px;
+                margin: -6px 0;
+                border-radius: 8px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: {ACCENT_HOVER};
+            }}
+            QSlider::handle:horizontal:pressed {{
+                background: {ACCENT};
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {ACCENT};
+                border-radius: 2px;
+            }}
         """)
 
-# Alternative: Enhanced version of original EditorPanel class
+
+# Enhanced version of original EditorPanel class with Premiere Pro styling
 class EnhancedEditorPanel(QWidget):
-    """Enhanced version of the original EditorPanel with modern styling"""
+    """Enhanced version of the original EditorPanel with Premiere Pro styling"""
     
-      
     # Same signals as original
     importRequested = pyqtSignal()
     playToggled = pyqtSignal(bool)
@@ -858,7 +994,7 @@ class EnhancedEditorPanel(QWidget):
     detectRequested = pyqtSignal()
     blurRequested = pyqtSignal(int)
     thumbnailClicked = pyqtSignal(int)
-    gestureItemClicked = pyqtSignal(object)   # <— accepts dict/int
+    gestureItemClicked = pyqtSignal(object)   
     exportRequested = pyqtSignal()
     
     def __init__(self, parent=None):
@@ -894,20 +1030,791 @@ class EnhancedEditorPanel(QWidget):
         except Exception as e:
             print(f"Audio setup warning: {e}")
 
-        # Apply styles and build UI
-        self.apply_modern_styles()
+        # Apply modern Premiere Pro styles and build UI
+        self.apply_premiere_styles()
         self._build_enhanced_ui()   
 
+    def apply_premiere_styles(self):
+        """Apply Premiere Pro inspired styling"""
+        self.setStyleSheet(f"""
+            QWidget {{
+                background-color: {APP_BG};
+                color: {TEXT};
+                font-family: 'Segoe UI', Tahoma, sans-serif;
+                font-size: 12px;
+            }}
+            QLabel#video_display {{
+                background: {DARKER_BG};
+                border: 2px solid {BORDER};
+                border-radius: 4px;
+            }}
+            QSlider::groove:horizontal {{
+                background: {BORDER};
+                height: 6px;
+                border-radius: 3px;
+                border: none;
+            }}
+            QSlider::handle:horizontal {{
+                background: {ACCENT};
+                border: 2px solid {PANEL_BG};
+                width: 18px;
+                height: 18px;
+                margin: -6px 0;
+                border-radius: 9px;
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: {ACCENT_HOVER};
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {ACCENT};
+                border-radius: 3px;
+            }}
+            QPushButton {{
+                background: {ACCENT};
+                color: white;
+                border: 1px solid {ACCENT};
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: 600;
+                min-width: 90px;
+            }}
+            QPushButton:hover {{
+                background: {ACCENT_HOVER};
+                border-color: {ACCENT_HOVER};
+            }}
+            QPushButton:pressed {{
+                background: {ACCENT};
+                transform: translateY(1px);
+            }}
+            QPushButton:disabled {{
+                background: {BORDER};
+                color: {SUBTEXT};
+                border-color: {BORDER};
+            }}
+            QPushButton#importPopupBtn {{
+                font-size: 16px;
+                padding: 12px 24px;
+                min-width: 180px;
+                background: {ACCENT};
+                border-radius: 6px;
+            }}
+            QPushButton#importPopupBtn:hover {{
+                background: {ACCENT_HOVER};
+            }}
+            QListWidget {{
+                background: {PANEL_BG};
+                border: 1px solid {BORDER};
+                border-radius: 4px;
+                padding: 4px;
+                selection-background-color: {ACCENT};
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 8px 10px;
+                border-bottom: 1px solid {BORDER};
+                border-radius: 3px;
+                margin: 1px 0;
+            }}
+            QListWidget::item:selected {{
+                background: {ACCENT};
+                color: white;
+            }}
+            QListWidget::item:hover:!selected {{ 
+                background: {BORDER}; 
+            }}
+            QFrame#bottom_bar {{
+                background: {PANEL_BG};
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+                padding: 8px;
+            }}
+            QScrollArea {{
+                border: 1px solid {BORDER};
+                border-radius: 4px;
+                background: {PANEL_BG};
+            }}
+            QScrollBar:horizontal {{
+                border: none;
+                background: {PANEL_BG};
+                height: 14px;
+                border-radius: 7px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {ACCENT};
+                border-radius: 7px;
+                min-width: 20px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {ACCENT_HOVER};
+            }}
+        """)
     
-    
-    #AUDIO NEW
-      
+    def _build_enhanced_ui(self):
+        """Build the enhanced UI with Premiere Pro styling"""
+        # Same structure as original but with enhanced styling
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+        
+        # Middle: Video / Markers split
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(2)
+        splitter.setStyleSheet(f"""
+            QSplitter::handle {{
+                background: {BORDER};
+                border-radius: 1px;
+            }}
+            QSplitter::handle:hover {{
+                background: {ACCENT};
+            }}
+        """)
+        
+        # Left side: video container
+        video_container = QFrame()
+        video_container.setStyleSheet(f"""
+            QFrame {{
+                background: {PANEL_BG};
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+                padding: 12px;
+            }}
+        """)
+        
+        # Professional shadow
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(12)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setOffset(0, 4)
+        video_container.setGraphicsEffect(shadow)
+        
+        video_layout = QVBoxLayout(video_container)
+        video_layout.setContentsMargins(0, 0, 0, 0)
+        video_layout.setSpacing(10)
+        
+        # Video display
+        self.video_display = VideoViewport()
+        self.video_display.setObjectName("video_display")
+        self.video_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.video_display.setMinimumHeight(400)
+        video_layout.addWidget(self.video_display)
 
+        # Selection badge
+        self.selection_badge = QLabel(self.video_display)
+        self.selection_badge.setText("")
+        self.selection_badge.setStyleSheet(f"""
+            QLabel {{
+                background: rgba(0, 120, 212, 200);
+                color: white;
+                font-weight: 600;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 11px;
+            }}
+        """)
+        self.selection_badge.hide()
+        self.selection_badge.move(8, 8)
+        
+        # Import popup overlay
+        self.create_enhanced_import_popup(video_container)
+        
+        # Enhanced slider
+        self.slider = ModernSlider(Qt.Horizontal)
+        self.slider.setEnabled(False)
+        self.slider.setMinimum(0)
+        self.slider.valueChanged.connect(lambda v: self.frameChanged.emit(v))
+        video_layout.addWidget(self.slider)
+        
+        # Enhanced control buttons
+        self.create_enhanced_controls(video_layout)
+        
+        splitter.addWidget(video_container)
+        
+        # Right side: Enhanced markers pane
+        self.create_enhanced_markers_panel(splitter)
+        
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        
+        main_layout.addWidget(splitter, stretch=1)
+        
+        # Enhanced bottom bar
+        self.create_enhanced_bottom_bar(main_layout)
+    
+    def create_enhanced_import_popup(self, parent):
+        """Create Premiere Pro style import popup"""
+        self.import_popup = QFrame(parent)
+        self.import_popup.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(35, 35, 35, 245);
+                border: 2px dashed {ACCENT};
+                border-radius: 8px;
+            }}
+        """)
+        
+        popup_layout = QVBoxLayout(self.import_popup)
+        popup_layout.setContentsMargins(0, 0, 0, 0)
+        popup_layout.setSpacing(0)
+        popup_layout.addStretch()
+        
+        # Professional icon
+        icon_label = QLabel("📁")
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setStyleSheet(f"""
+            QLabel {{
+                font-size: 48px;
+                background: none;
+                border: none;
+                color: {ACCENT};
+                padding: 16px;
+            }}
+        """)
+        popup_layout.addWidget(icon_label)
+        
+        # Button
+        hbox = QHBoxLayout()
+        hbox.addStretch()
+        
+        self.importPopupBtn = QPushButton("Import Video", self.import_popup)
+        self.importPopupBtn.setObjectName("importPopupBtn")
+        self.importPopupBtn.clicked.connect(self.importRequested.emit)
+        hbox.addWidget(self.importPopupBtn)
+        hbox.addStretch()
+        
+        popup_layout.addLayout(hbox)
+        
+        # Professional help text
+        help_text = QLabel("Drop a video file here or click to browse")
+        help_text.setAlignment(Qt.AlignCenter)
+        help_text.setStyleSheet(f"""
+            QLabel {{
+                color: {SUBTEXT};
+                font-size: 13px;
+                background: none;
+                border: none;
+                padding: 16px;
+                font-weight: 400;
+            }}
+        """)
+        popup_layout.addWidget(help_text)
+        popup_layout.addStretch()
+        
+        self.import_popup.setGeometry(20, 20, 800, 500)
+        self.import_popup.show()
+    
+    def create_enhanced_controls(self, parent_layout):
+        """Create Premiere Pro style control buttons"""
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        
+        btn_row.addStretch()
+        
+        self.toggle_button = ModernButton("▶ Play", "primary")
+        self.toggle_button.setEnabled(False)
+        self.toggle_button.clicked.connect(self._on_toggle_clicked)
+        btn_row.addWidget(self.toggle_button)
+        
+        self.detect_button = ModernButton("🔍 Detect", "secondary")
+        self.detect_button.setEnabled(False)
+        self.detect_button.clicked.connect(lambda: self.detectRequested.emit())
+        btn_row.addWidget(self.detect_button)
+        
+        self.blur_button = ModernButton("🔒 Blur", "secondary")
+        self.blur_button.setEnabled(False)
+        self.blur_button.clicked.connect(lambda: self.blurRequested.emit(self.current_frame_idx))
+        btn_row.addWidget(self.blur_button)
+        
+        self.export_button = ModernButton("📤 Export", "primary")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(lambda: self.exportRequested.emit())
+        btn_row.addWidget(self.export_button)
+        
+        btn_row.addStretch()
+        
+        parent_layout.addLayout(btn_row)
+
+    def create_enhanced_markers_panel(self, parent_splitter):
+        """
+        Professional right sidebar with four cards: Video Properties, Detection Settings, Blur Settings, Detected Gestures
+        """
+        container = QFrame()
+        container.setMinimumWidth(320)
+        container.setMaximumWidth(400)
+        container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        container.setStyleSheet(f"QFrame {{ background: {APP_BG}; border: 0; }}")
+
+        # Professional shadow for the entire panel
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(10)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        shadow.setOffset(-2, 0)
+        container.setGraphicsEffect(shadow)
+
+        root = QVBoxLayout(container)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+
+        # --- 1) Video Properties ---
+        card_video = CardSection("Video Properties", container)
+        self.lbl_fps = card_video.add_label_value("FPS:", "--")
+        self.lbl_res = card_video.add_label_value("Resolution:", "--")
+        self.lbl_dur = card_video.add_label_value("Duration:", "--")
+        root.addWidget(card_video)
+
+        # --- 2) Detection Settings ---
+        card_detect = CardSection("Detection Settings", container)
+
+        # Confidence slider
+        conf_row = QHBoxLayout()
+        conf_row.setSpacing(8)
+        conf_label = QLabel("Confidence:")
+        conf_label.setObjectName("sfField")
+
+        self.conf_slider = QSlider(Qt.Horizontal)
+        self.conf_slider.setMinimum(30)
+        self.conf_slider.setMaximum(95)
+        self.conf_slider.setSingleStep(1)
+        self.conf_slider.setValue(80)
+        self.conf_val_pill = QLabel("80%")
+        self.conf_val_pill.setObjectName("sfPill")
+
+        def _on_conf_change(v):
+            if hasattr(self, "conf_val_pill"):
+                self.conf_val_pill.setText(f"{v}%")
+        self.conf_slider.valueChanged.connect(_on_conf_change)
+
+        conf_row.addWidget(conf_label)
+        conf_row.addWidget(self.conf_slider, 1)
+        conf_row.addWidget(self.conf_val_pill)
+        card_detect.inner_lay.addLayout(conf_row)
+
+        # Frame Skip setting
+        skip_row = QHBoxLayout()
+        skip_row.setSpacing(8)
+        skip_label = QLabel("Frame Skip:")
+        skip_label.setObjectName("sfField")
+
+        self.skip_spin = QSpinBox()
+        self.skip_spin.setMinimum(1)
+        self.skip_spin.setMaximum(10)
+        self.skip_spin.setValue(2)
+
+        skip_row.addWidget(skip_label)
+        skip_row.addWidget(self.skip_spin, 0, Qt.AlignRight)
+        card_detect.inner_lay.addLayout(skip_row)
+
+        root.addWidget(card_detect)
+
+        # --- 3) Blur Settings ---
+        card_blur = CardSection("Blur Settings", container)
+
+        # Blur type radio buttons
+        blur_type_label = QLabel("Blur Type:")
+        blur_type_label.setObjectName("sfField")
+        rb_row = QHBoxLayout()
+        rb_row.setSpacing(10)
+        self.rb_gauss = QRadioButton("Gaussian")
+        self.rb_pixel = QRadioButton("Pixelate")
+        self.rb_solid = QRadioButton("Solid")
+        self.rb_gauss.setChecked(True)
+        self.blur_type_group = QButtonGroup(card_blur)
+        self.blur_type_group.addButton(self.rb_gauss, 0)
+        self.blur_type_group.addButton(self.rb_pixel, 1)
+        self.blur_type_group.addButton(self.rb_solid, 2)
+        rb_row.addWidget(self.rb_gauss)
+        rb_row.addWidget(self.rb_pixel)
+        rb_row.addWidget(self.rb_solid)
+        rb_row.addStretch(1)
+        
+        row_bt = QHBoxLayout()
+        row_bt.setSpacing(8)
+        row_bt.addWidget(blur_type_label)
+        row_bt.addLayout(rb_row, 1)
+        card_blur.inner_lay.addLayout(row_bt)
+
+        # Blur strength slider
+        self.blur_strength = QSlider(Qt.Horizontal)
+        self.blur_strength.setMinimum(0)
+        self.blur_strength.setMaximum(100)
+        self.blur_strength_value = getattr(self, "blur_strength_value", 50)
+        self.blur_strength.setValue(self.blur_strength_value)
+        self.blur_strength.valueChanged.connect(self._on_strength_changed)
+        self.lbl_strength_pct = QLabel(f"{self.blur_strength_value}%")
+        self.lbl_strength_pct.setObjectName("sfPill")
+
+        row_str = QHBoxLayout()
+        row_str.setSpacing(8)
+        lab_str = QLabel("Strength:")
+        lab_str.setObjectName("sfField")
+        row_str.addWidget(lab_str)
+        row_str.addWidget(self.blur_strength, 1)
+        row_str.addWidget(self.lbl_strength_pct)
+        card_blur.inner_lay.addLayout(row_str)
+
+        root.addWidget(card_blur)
+
+        # --- 4) Detected Gestures ---
+        card_g = CardSection("Detected Gestures", container)
+        self.gesture_list = QListWidget()
+        self.gesture_list.setMinimumHeight(120)
+        self.gesture_list.setMaximumHeight(250)
+
+        # Connect gesture list clicks
+        self.gesture_list.itemClicked.connect(
+            lambda it: self.gestureItemClicked.emit(
+                ({"person_id": int(d[0]), "gesture": str(d[1]), "frame": int(d[2]), "bbox": d[3]}
+                if isinstance((d := it.data(Qt.UserRole)), (tuple, list)) and len(d) >= 4 else
+                d if isinstance(d, dict) else
+                (int(d) if isinstance(d, (int, float)) else self.gesture_list.row(it)))
+            )
+        )
+        
+        card_g.inner_lay.addWidget(self.gesture_list)
+        root.addWidget(card_g)
+        root.addStretch(1)
+
+        parent_splitter.addWidget(container)
+        
+        # Set splitter proportions
+        try:
+            parent_splitter.setStretchFactor(0, 3)  # video
+            parent_splitter.setStretchFactor(1, 1)  # sidebar
+            parent_splitter.setSizes([900, 400])
+        except Exception:
+            pass
+
+    def _on_strength_changed(self, v: int):
+        self.blur_strength_value = v
+        if hasattr(self, "lbl_strength_pct"):
+            self.lbl_strength_pct.setText(f"{v}%")
+
+    def create_enhanced_bottom_bar(self, parent_layout):
+        """Create Premiere Pro style timeline bar"""
+        bottom_bar = QFrame()
+        bottom_bar.setObjectName("bottom_bar")
+        bottom_layout = QVBoxLayout(bottom_bar)
+        bottom_layout.setContentsMargins(12, 8, 12, 8)
+        bottom_layout.setSpacing(6)
+        
+        # Timeline ruler
+        self.time_ruler = EnhancedTimeRuler()
+        bottom_layout.addWidget(self.time_ruler)
+        
+        # Thumbnail timeline
+        self.thumbnail_scroll = QScrollArea()
+        self.thumbnail_scroll.setFixedHeight(80)
+        self.thumbnail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.thumbnail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.thumbnail_scroll.setWidgetResizable(True)
+        
+        thumb_container = QWidget()
+        self.thumbnail_layout = QHBoxLayout(thumb_container)
+        self.thumbnail_layout.setContentsMargins(6, 6, 6, 6)
+        self.thumbnail_layout.setSpacing(4)    
+        self.thumbnail_scroll.setWidget(thumb_container)
+        
+        bottom_layout.addWidget(self.thumbnail_scroll)
+        parent_layout.addWidget(bottom_bar, stretch=0)
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
+        # Keep the import overlay fitting the video area
+        if hasattr(self, 'import_popup'):
+            parent_rect = self.video_display.geometry()
+            margin = 24
+            self.import_popup.setGeometry(
+                parent_rect.x() + margin,
+                parent_rect.y() + margin,
+                parent_rect.width() - 2 * margin,
+                parent_rect.height() - 2 * margin
+            )
+
+        # Rescale the currently shown frame to the new label size
+        if hasattr(self, "_last_frame_bgr") and self._last_frame_bgr is not None:
+            rgb = cv2.cvtColor(self._last_frame_bgr, cv2.COLOR_BGR2RGB)
+            h, w, _ = rgb.shape
+            qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
+            pix = QPixmap.fromImage(qimg).scaled(
+                self.video_display.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+
+    # All other methods remain the same as original EditorPanel
+
+    def get_detection_params(self):
+        """Return current detection UI knobs in controller-friendly units."""
+        conf_pct = self.conf_slider.value() if hasattr(self, "conf_slider") else 80
+        frame_skip = self.skip_spin.value() if hasattr(self, "skip_spin") else 2
+        return {
+            "confidence": conf_pct / 100.0,   # 0.80 for 80%
+            "frame_skip": int(frame_skip),
+        }  
+
+    def set_video_info(self, rotation_angle, total_frames, fps):
+        """Set video information and enable controls"""
+        self.rotation_angle = rotation_angle
+        self.total_frames = total_frames
+        self.fps = fps
+        self.current_frame_idx = 0
+
+        self.slider.setMaximum(max(0, total_frames - 1))
+        self.slider.setEnabled(True)    
+        self.toggle_button.setEnabled(True)
+        self.detect_button.setEnabled(True)
+        self.blur_button.setEnabled(True)
+        self.export_button.setEnabled(True)
+
+        self.time_ruler.setVideoInfo(total_frames, fps)
+        self.core_has_video = True
+        self.import_popup.hide()
+
+        # Audio setup if we already know the file path
+        try:
+            if getattr(self, "video_path", None):
+                self.set_media_source(self.video_path)
+        except Exception:
+            pass
+
+        # Update the Video Properties pills (FPS / Resolution / Duration)
+        try:
+            if hasattr(self, "lbl_fps"):
+                self.lbl_fps.setText(f"{fps:.0f}" if fps else "--")
+
+            if hasattr(self, "lbl_res"):
+                self.lbl_res.setText("--")
+
+            if hasattr(self, "lbl_dur"):
+                duration = (total_frames / fps) if (fps and total_frames) else 0
+                mm = int(duration // 60)
+                ss = int(duration % 60)
+                self.lbl_dur.setText(f"{mm:02d}:{ss:02d}" if duration else "--")
+        except Exception:
+            pass
+
+    def show_selection_badge(self, text: str):
+        self.selection_badge.setText(text)
+        self.selection_badge.adjustSize()
+        self.selection_badge.show()
+
+    def hide_selection_badge(self):
+        self.selection_badge.hide()
+    
+    def display_frame(self, img_bgr, frame_idx: int):
+        """Display video frame (optimized for smooth playback)"""
+        
+        if img_bgr is None:
+            self.video_display.set_frame_qimage(QImage())
+            self.current_frame_idx = -1
+            self.time_ruler.setCurrentFrame(-1)
+            return
+
+        try:
+            # Apply rotation if needed
+            if hasattr(self, 'rotation_angle'):
+                if self.rotation_angle == 90:
+                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
+                elif self.rotation_angle == 180:
+                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_180)
+                elif self.rotation_angle == 270:
+                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            
+            rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            bytes_per_line = ch * w
+            
+            # Ensure contiguous array for performance
+            rgb = np.ascontiguousarray(rgb)
+            
+            # Create QImage with copied data
+            img_bytes = rgb.tobytes()
+            qimg = QImage(img_bytes, w, h, bytes_per_line, QImage.Format_RGB888)
+            qimg = qimg.copy()  # Force deep copy
+
+            # Set aspect ratio only once
+            if not hasattr(self.video_display, '_aspect_set'):
+                self.video_display.set_aspect_from_size(w, h)
+                self.video_display._aspect_set = True
+
+            # Update display
+            self.video_display.set_frame_qimage(qimg)
+            self.current_frame_idx = frame_idx
+            self.time_ruler.setCurrentFrame(frame_idx)
+            
+            # Update slider without triggering signals
+            self.slider.blockSignals(True)
+            self.slider.setValue(frame_idx)
+            self.slider.blockSignals(False)
+
+            # Sync audio only when NOT playing (avoid double-sync during playback)
+            if not getattr(self, 'is_playing', False):
+                self.audio_seek_to_frame(frame_idx, self.fps)
+
+        except Exception as e:
+            print(f"Error displaying frame: {e}")
+            self.video_display.set_frame_qimage(QImage())
+            self.current_frame_idx = -1
+            self.time_ruler.setCurrentFrame(-1)
+    
+    def clear_thumbnails(self):
+        """Clear all thumbnails"""
+        if hasattr(self, "thumbnail_labels"):
+            for thumb in self.thumbnail_labels:
+                self.thumbnail_layout.removeWidget(thumb)
+                thumb.deleteLater()
+            self.thumbnail_labels = []
+            self.thumbnail_frame_indices = []
+    
+    def add_thumbnails(self, thumbs):
+        if not hasattr(self, "thumbnail_labels"):
+            self.thumbnail_labels = []
+            self.thumbnail_frame_indices = []
+
+        for idx, thumb_rgb in thumbs:
+            h, w, _ = thumb_rgb.shape
+            bytes_per_line = w * 3
+            qimg = QImage(thumb_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            pix = QPixmap.fromImage(qimg).scaledToHeight(64, Qt.SmoothTransformation)
+
+            thumb_label = QLabel()
+            thumb_label.setPixmap(pix)
+            thumb_label.setFixedSize(QSize(pix.width(), pix.height()))
+            thumb_label.setCursor(QCursor(Qt.PointingHandCursor))
+            thumb_label.setStyleSheet(f"""
+                QLabel {{
+                    border: 2px solid {BORDER};
+                    border-radius: 3px;
+                    padding: 1px;
+                    background: {PANEL_BG};
+                }}
+                QLabel:hover {{
+                    border-color: {ACCENT};
+                    background: {BORDER};
+                }}
+            """)
+            thumb_label.mousePressEvent = lambda e, i=idx: self.thumbnailClicked.emit(i)
+
+            # Subtle shadow for thumbnails
+            shadow = QGraphicsDropShadowEffect()
+            shadow.setBlurRadius(4)
+            shadow.setColor(QColor(0, 0, 0, 60))
+            shadow.setOffset(0, 1)
+            thumb_label.setGraphicsEffect(shadow)
+
+            self.thumbnail_layout.addWidget(thumb_label)
+            self.thumbnail_labels.append(thumb_label)
+            self.thumbnail_frame_indices.append(idx)
+
+    def add_gesture_items(self, segment_starts):
+        """Populate the gesture list with detected frame indices"""
+        self.gesture_list.clear()
+        for idx in segment_starts:
+            t = idx / self.fps if self.fps > 0 else 0
+            mm = int(t // 60)
+            ss = int(t % 60)
+            msec = int((t - int(t)) * 1000)
+            time_str = f"{mm:02}:{ss:02}.{msec:03}"
+            item = QListWidgetItem(f"✋  {time_str}")
+            item.setData(Qt.UserRole, idx)
+            self.gesture_list.addItem(item)
+        # Enable the blur button only if we have gestures
+        self.blur_button.setEnabled(bool(segment_starts))
+
+    def clear_markers(self):
+        """Clear all detected gestures"""
+        self.gesture_list.clear()
+        self.blur_button.setEnabled(False)
+
+    def _on_toggle_clicked(self):
+        """Handle Play/Pause toggle with audio debugging"""
+        self.is_playing = not self.is_playing
+        self.playToggled.emit(self.is_playing)
+        self.toggle_button.setText("⏸ Pause" if self.is_playing else "▶ Play")
+
+        print(f"\n=== PLAY/PAUSE DEBUG ===")
+        print(f"Playing: {self.is_playing}")
+        print(f"Current frame: {self.current_frame_idx}")
+        print(f"FPS: {self.fps}")
+        
+        # Debug audio status before attempting to play
+        self.debug_audio_status()
+
+        # Keep audio in lockstep with video transport
+        if self.is_playing:
+            print(f"Attempting to play audio from frame {self.current_frame_idx}")
+            self.audio_play_from_frame(self.current_frame_idx, self.fps)
+            
+            # Check status after attempting to play
+            print("After play attempt:")
+            self.debug_audio_status()
+        else:
+            print("Pausing audio")
+            self.audio_pause()
+
+    def _on_timer_tick(self):
+        """Internal timer slot (controller usually drives playback)"""
+        pass
+
+    # ---- Progress Dialogs ----
+    def start_detect_progress(self):
+        self._dlg_detect = ProcessingDialog(self, "Processing", "Detecting gestures…", None, False)
+        self._dlg_detect.show()
+        QApplication.processEvents()
+
+    def finish_detect_progress(self):
+        if hasattr(self, "_dlg_detect"):
+            self._dlg_detect.close()
+            del self._dlg_detect
+
+    def start_export_progress(self):
+        self._dlg_export = ProcessingDialog(self, "Exporting", "Writing video file…", 100, False)
+        self._dlg_export.show()
+        QApplication.processEvents()
+
+    def set_export_progress(self, pct: int):
+        if hasattr(self, "_dlg_export"):
+            self._dlg_export.set_progress(pct)
+            QApplication.processEvents()
+
+    def finish_export_progress(self, success=True):
+        """Finish export progress dialog"""
+        if hasattr(self, "_dlg_export"):
+            self._dlg_export.set_progress(100)
+            if success:
+                self._dlg_export.set_message("Export complete")
+            else:
+                self._dlg_export.set_message("Export failed")
+                
+            QTimer.singleShot(300, lambda: (
+                self._dlg_export.close() if hasattr(self, "_dlg_export") else None,
+                delattr(self, "_dlg_export") if hasattr(self, "_dlg_export") else None
+            ))
+
+    def start_blur_progress(self):
+        self._dlg_blur = ProcessingDialog(
+            parent=self,
+            title="Processing",
+            message="Blurring person in video…",
+            total_steps=100,
+            allow_cancel=False
+        )
+        self._dlg_blur.show()
+        QApplication.processEvents()
+
+    def set_blur_progress(self, pct: int):
+        if hasattr(self, "_dlg_blur") and self._dlg_blur:
+            self._dlg_blur.set_progress(int(max(0, min(100, pct))))
+            QApplication.processEvents()
+
+    def finish_blur_progress(self, success: bool = True):
+        if hasattr(self, "_dlg_blur") and self._dlg_blur:
+            try:
+                self._dlg_blur.finish("Complete" if success else "Failed")
+            finally:
+                self._dlg_blur = None
+
+    # ---- Audio Methods (keeping existing functionality) ----
     def prepare_audio_for(self, path: str):
-        """
-        Try to load audio directly from the video. If DirectShow rejects it,
-        extract a WAV with ffmpeg and load that instead.
-        """
+        """Try to load audio directly from the video. If DirectShow rejects it, extract a WAV with ffmpeg and load that instead."""
         from PyQt5.QtCore import QUrl
         import os, subprocess, tempfile, shutil
 
@@ -927,7 +1834,7 @@ class EnhancedEditorPanel(QWidget):
                 )
                 return cp.returncode != 0 or not cp.stdout.strip()
             except Exception:
-                # if ffprobe missing, we can’t tell — let QMediaPlayer try first
+                # if ffprobe missing, we can't tell — let QMediaPlayer try first
                 return False
 
         # If it looks like no audio stream, bail out early (nothing to play)
@@ -955,7 +1862,7 @@ class EnhancedEditorPanel(QWidget):
             self._has_media = True
             print(f"Audio loaded successfully - Duration: {self._player.duration()}ms")
             
-            # NEW: If we're supposed to be playing, retry the audio playback
+            # If we're supposed to be playing, retry the audio playback
             if getattr(self, 'is_playing', False):
                 print("Retrying audio playback after successful load...")
                 self.audio_play_from_frame(self.current_frame_idx, self.fps)
@@ -976,7 +1883,6 @@ class EnhancedEditorPanel(QWidget):
                 print(f"Audio still not ready: has_media={self._has_media}, duration={self._player.duration()}ms")
         except Exception as e:
             print(f"Retry audio error: {e}")
-
 
     def _on_media_error(self, error):
         """Handle media playback errors"""
@@ -1001,7 +1907,7 @@ class EnhancedEditorPanel(QWidget):
                 self._audio_fallback_path = wav_path
                 self.set_media_source(wav_path)
                 
-                # NEW: Schedule a retry of audio playback after fallback
+                # Schedule a retry of audio playback after fallback
                 self._retry_audio_after_fallback()
                 
         except Exception as e:
@@ -1099,7 +2005,6 @@ class EnhancedEditorPanel(QWidget):
             print(f"Failed to set media source: {e}")
             self._has_media = False
 
-
     def audio_play_from_frame(self, frame_idx: int, fps: float):
         """Play audio from specific frame position with minimal overhead"""
         try:
@@ -1133,7 +2038,7 @@ class EnhancedEditorPanel(QWidget):
             else:
                 print("No media to pause")
         except Exception as e:
-            print(f"❌ Audio pause error: {e}")
+            print(f"⚠ Audio pause error: {e}")
 
     def audio_seek_to_frame(self, frame_idx: int, fps: float):
         """Seek audio to frame position without playing (for scrubbing)"""
@@ -1154,7 +2059,7 @@ class EnhancedEditorPanel(QWidget):
                     
         except Exception as e:
             print(f"Audio seek error: {e}")
-    # ADDITIONAL: Add this method to monitor audio/video sync during playback
+
     def get_audio_position_ms(self):
         """Get current audio playback position in milliseconds"""
         try:
@@ -1198,57 +2103,6 @@ class EnhancedEditorPanel(QWidget):
             pass
         super().closeEvent(event)
 
-
-
-
-    
-    def _try_native_media(self, path: str) -> bool:
-        """Try to load the video file directly. Returns True if backend accepts it."""
-        self._has_media = False
-        self._player.stop()
-        self._player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
-        # Give the backend a moment to change status
-        QTimer.singleShot(0, lambda: None)
-        # crude: we’ll consider it 'accepted' if it reaches Loaded within a short delay
-        ok = []
-
-        def _on_status(s):
-            if int(s) == 3:   # Loaded
-                ok.append(True)
-        self._player.mediaStatusChanged.connect(_on_status)
-        QApplication.processEvents()
-        # tiny pump
-        for _ in range(8):
-            QApplication.processEvents()
-            QTimer.singleShot(10, lambda: None)
-        try:
-            self._player.mediaStatusChanged.disconnect(_on_status)
-        except Exception:
-            pass
-
-        if ok:
-            self._has_media = True
-            self._player.setPosition(0)
-            return True
-        return False
-
-    def _extract_audio_to_wav(self, path: str) -> str:
-        """Extract audio to a temporary WAV using ffmpeg CLI."""
-        import tempfile, subprocess, shlex, os
-        tmp_dir = tempfile.gettempdir()
-        base = os.path.splitext(os.path.basename(path))[0]
-        out_path = os.path.join(tmp_dir, f"{base}_sfm_audio.wav")
-        # -vn: no video; -ac 2: stereo; -ar 44100: 44.1k; 16-bit PCM by default
-        cmd = f'ffmpeg -y -i "{path}" -vn -ac 2 -ar 44100 "{out_path}"'
-        try:
-            # hide console noise; ffmpeg must be in PATH
-            subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            return out_path
-        except Exception as e:
-            print("ffmpeg extract failed:", e)
-            raise
-
-
     def debug_audio_status(self):
         """Debug method to check audio player status"""
         try:
@@ -1264,859 +2118,36 @@ class EnhancedEditorPanel(QWidget):
         except Exception as e:
             print(f"Audio debug error: {e}")
 
-    def apply_modern_styles(self):
-        """Apply modern dark theme styles"""
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #1A202C;
-                color: #E2E8F0;
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-            }
-            QLabel#video_display {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2D3748, stop:1 #1A202C);
-                border: 2px solid #4A5568;
-                border-radius: 12px;
-            }
-            QSlider::groove:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2D3748, stop:1 #1A202C);
-                height: 8px;
-                border-radius: 4px;
-                border: 1px solid #4A5568;
-            }
-            QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4FD1C7, stop:1 #38B2AC);
-                border: 2px solid #2D3748;
-                width: 20px;
-                height: 20px;
-                margin: -7px 0;
-                border-radius: 12px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #68D391, stop:1 #48BB78);
-            }
-            QSlider::sub-page:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4FD1C7, stop:1 #38B2AC);
-                border-radius: 4px;
-            }
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4299E1, stop:1 #3182CE);
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 8px;
-                font-size: 13px;
-                font-weight: 600;
-                min-width: 100px;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4FD1C7, stop:1 #38B2AC);
-            }
-            QPushButton:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2C5282, stop:1 #2A4A6B);
-            }
-            QPushButton:disabled {
-                background: #4A5568;
-                color: #A0AEC0;
-            }
-            QPushButton#importPopupBtn {
-                font-size: 18px;
-                padding: 15px 30px;
-                min-width: 200px;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4FD1C7, stop:1 #38B2AC);
-            }
-            QPushButton#importPopupBtn:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #68D391, stop:1 #48BB78);
-            }
-            QListWidget {
-                background: #2D3748;
-                border: 1px solid #4A5568;
-                border-radius: 8px;
-                padding: 8px;
-            }
-            QListWidget::item {
-                padding: 12px;
-                border-bottom: 1px solid #4A5568;
-                border-radius: 6px;
-                margin: 2px 0;
-            }
-            QListWidget::item:selected {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4FD1C7, stop:1 #38B2AC);
-                color: white;
-            }
-            QListWidget::item:hover {
-                background: #4A5568;
-            }
-            QFrame#bottom_bar {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4A5568, stop:1 #2D3748);
-                border: 1px solid #718096;
-                border-radius: 12px;
-                padding: 10px;
-            }
-            QScrollArea {
-                border: 1px solid #4A5568;
-                border-radius: 8px;
-                background: #2D3748;
-            }
-            QScrollBar:horizontal {
-                border: none;
-                background: #2D3748;
-                height: 12px;
-                border-radius: 6px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #4FD1C7;
-                border-radius: 6px;
-                min-width: 20px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #68D391;
-            }
-        """)
-    
-    def _build_enhanced_ui(self):
-        """Build the enhanced UI with modern styling"""
-        # Same structure as original but with enhanced styling
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(15)
-        
-        # Middle: Video / Markers split
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setHandleWidth(3)
-        splitter.setStyleSheet("""
-            QSplitter::handle {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #4A5568, stop:1 #2D3748);
-                border-radius: 2px;
-            }
-            QSplitter::handle:hover {
-                background: #4FD1C7;
-            }
-        """)
-        
-        # Left side: video container
-        video_container = QFrame()
-        video_container.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #4A5568, stop:1 #2D3748);
-                border: 1px solid #718096;
-                border-radius: 15px;
-                padding: 15px;
-            }
-        """)
-        
-        # Add drop shadow to video container
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
-        shadow.setColor(QColor(0, 0, 0, 120))
-        shadow.setOffset(0, 8)
-        video_container.setGraphicsEffect(shadow)
-        
-        video_layout = QVBoxLayout(video_container)
-        video_layout.setContentsMargins(0, 0, 0, 0)
-        video_layout.setSpacing(15)
-        
-        # Video display
-        self.video_display = VideoViewport()
-        self.video_display.setObjectName("video_display")
-        self.video_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.video_display.setMinimumHeight(400)
-        video_layout.addWidget(self.video_display)
 
-        # BELOW self.video_display setup NEW
-        self.selection_badge = QLabel(self.video_display)
-        self.selection_badge.setText("")
-        self.selection_badge.setStyleSheet("""
-            QLabel {
-                background: transparent;
-                color: white;
-                font-weight: 700;
-                padding: 6px 10px;
-                border-radius: 8px;
-            }
-        """)
-        self.selection_badge.hide()
-        self.selection_badge.move(12, 12)  # top-left over the video
-
-      
-        # Import popup overlay
-        self.create_enhanced_import_popup(video_container)
-        
-        # Enhanced slider
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setEnabled(False)
-        self.slider.setMinimum(0)
-        self.slider.valueChanged.connect(lambda v: self.frameChanged.emit(v))
-        video_layout.addWidget(self.slider)
-        
-        # Enhanced control buttons
-        self.create_enhanced_controls(video_layout)
-        
-        splitter.addWidget(video_container)
-        
-        # Right side: Enhanced markers pane
-        self.create_enhanced_markers_panel(splitter)
-        
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        
-        main_layout.addWidget(splitter, stretch=1)
-        
-        # Enhanced bottom bar
-        self.create_enhanced_bottom_bar(main_layout)
-        
-        
-    
-        
-    
-    
-    def create_enhanced_import_popup(self, parent):
-        """Create enhanced import popup"""
-        self.import_popup = QFrame(parent)
-        self.import_popup.setStyleSheet("""
-            QFrame {
-                background: rgba(26, 32, 44, 240);
-                border: 3px dashed #4FD1C7;
-                border-radius: 15px;
-            }
-        """)
-        
-        popup_layout = QVBoxLayout(self.import_popup)
-        popup_layout.setContentsMargins(0, 0, 0, 0)
-        popup_layout.setSpacing(0)
-        popup_layout.addStretch()
-        
-        # Icon
-        icon_label = QLabel("🎬")
-        icon_label.setAlignment(Qt.AlignCenter)
-        icon_label.setStyleSheet("""
-            QLabel {
-                font-size: 64px;
-                background: none;
-                border: none;
-                color: #4FD1C7;
-                padding: 20px;
-            }
-        """)
-        popup_layout.addWidget(icon_label)
-        
-        # Button
-        hbox = QHBoxLayout()
-        hbox.addStretch()
-        
-        self.importPopupBtn = QPushButton("Import Video", self.import_popup)
-        self.importPopupBtn.setObjectName("importPopupBtn")
-        self.importPopupBtn.clicked.connect(self.importRequested.emit)
-        hbox.addWidget(self.importPopupBtn)
-        hbox.addStretch()
-        
-        popup_layout.addLayout(hbox)
-        
-        # Help text
-        help_text = QLabel("Drag & drop a video file or click to browse")
-        help_text.setAlignment(Qt.AlignCenter)
-        help_text.setStyleSheet("""
-            QLabel {
-                color: #A0AEC0;
-                font-size: 16px;
-                background: none;
-                border: none;
-                padding: 20px;
-            }
-        """)
-        popup_layout.addWidget(help_text)
-        popup_layout.addStretch()
-        
-        self.import_popup.setGeometry(20, 20, 800, 500)
-        self.import_popup.show()
-    
-    def create_enhanced_controls(self, parent_layout):
-        """Create enhanced control buttons"""
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(15)
-        
-        btn_row.addStretch()
-        
-        self.toggle_button = QPushButton("▶ Play")
-        self.toggle_button.setEnabled(False)
-        self.toggle_button.clicked.connect(self._on_toggle_clicked)
-        btn_row.addWidget(self.toggle_button)
-        
-        self.detect_button = QPushButton("🔍 Detect Gestures")
-        self.detect_button.setEnabled(False)
-        self.detect_button.clicked.connect(lambda: self.detectRequested.emit())
-        btn_row.addWidget(self.detect_button)
-        
-        self.blur_button = QPushButton("🔒 Blur Person")
-        self.blur_button.setEnabled(False)
-        self.blur_button.clicked.connect(lambda: self.blurRequested.emit(self.current_frame_idx))
-        btn_row.addWidget(self.blur_button)
-        
-        self.export_button = QPushButton("📤 Export Video")
-        self.export_button.setEnabled(False)
-        self.export_button.clicked.connect(lambda: self.exportRequested.emit())
-        btn_row.addWidget(self.export_button)
-        
-        btn_row.addStretch()
-        
-        parent_layout.addLayout(btn_row)
-
-
-    def create_enhanced_markers_panel(self, parent_splitter):
-        """
-        Left sidebar with FOUR cards:
-        1) Video Properties
-        2) Detection Settings
-        3) Blur Settings
-        4) Detected Gestures# --- 2) Detection Settings ---
-card_detect = CardSection("Detection Settings", container)
-# default values (adjust from your core later if you like)
-self.lbl_conf = card_detect.add_label_value("Confidence:", "80%")
-self.lbl_skip = card_detect.add_label_value("Frame Skip:", "2")
-root.addWidget(card_detect)
-
-        Exactly like your reference (3 boxes before the list).
-        """
-        container = QFrame()
-       
-        # NEW
-        container.setMinimumWidth(330)                         # keep a sensible floor
-        container.setMaximumWidth(700)                         # optional cap; remove if you want unlimited
-        container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-
-        container.setStyleSheet("QFrame { background:#1a202c; border:0; }")
-
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(18); shadow.setColor(QColor(0,0,0,110)); shadow.setOffset(0,6)
-        container.setGraphicsEffect(shadow)
-
-        root = QVBoxLayout(container)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(14)
-
-        # --- 1) Video Properties ---
-        card_video = CardSection("Video Properties", container)
-        self.lbl_fps = card_video.add_label_value("FPS:", "--")
-        self.lbl_res = card_video.add_label_value("Resolution:", "--")
-        self.lbl_dur = card_video.add_label_value("Duration:", "--")
-        root.addWidget(card_video)
-
-               # --- 2) Detection Settings (editable) ---
-        card_detect = CardSection("Detection Settings", container)
-
-        # Confidence row: slider + % pill
-        conf_row = QHBoxLayout(); conf_row.setSpacing(10)
-        conf_label = QLabel("Confidence:"); conf_label.setObjectName("sfField")
-
-        self.conf_slider = QSlider(Qt.Horizontal)
-        self.conf_slider.setMinimum(30)    # 30% min (raise/lower if you prefer)
-        self.conf_slider.setMaximum(95)    # 95% max (avoid 99/100 making no detections)
-        self.conf_slider.setSingleStep(1)
-        self.conf_slider.setValue(80)      # default 80%
-        self.conf_val_pill = QLabel("80%"); self.conf_val_pill.setObjectName("sfPill")
-
-        def _on_conf_change(v):
-            if hasattr(self, "conf_val_pill"):
-                self.conf_val_pill.setText(f"{v}%")
-        self.conf_slider.valueChanged.connect(_on_conf_change)
-
-        conf_row.addWidget(conf_label)
-        conf_row.addWidget(self.conf_slider, 1)
-        conf_row.addWidget(self.conf_val_pill)
-        card_detect.inner_lay.addLayout(conf_row)
-
-        # Frame Skip row: spinbox (how many frames to skip between detections)
-        skip_row = QHBoxLayout(); skip_row.setSpacing(10)
-        skip_label = QLabel("Frame Skip:"); skip_label.setObjectName("sfField")
-
-        self.skip_spin = QSpinBox()
-        self.skip_spin.setMinimum(1)
-        self.skip_spin.setMaximum(10)
-        self.skip_spin.setValue(2)
-        # styling to match pills
-        self.skip_spin.setStyleSheet("""
-            QSpinBox {
-                background:#171a1f; color:#e6eaf0; border:1px solid #2b3037;
-                border-radius:8px; padding:4px 8px; min-width:64px;
-            }
-            QSpinBox::down-button, QSpinBox::up-button { width:16px; }
-        """)
-
-        skip_row.addWidget(skip_label)
-        skip_row.addWidget(self.skip_spin, 0, Qt.AlignRight)
-        card_detect.inner_lay.addLayout(skip_row)
-
-        root.addWidget(card_detect)
-
-        
-
-        # --- 3) Blur Settings ---
-        card_blur = CardSection("Blur Settings", container)
-
-        blur_type_label = QLabel("Blur Type:"); blur_type_label.setObjectName("sfField")
-        rb_row = QHBoxLayout(); rb_row.setSpacing(12)
-        self.rb_gauss = QRadioButton("Gaussian")
-        self.rb_pixel = QRadioButton("Pixelate")
-        self.rb_solid = QRadioButton("Solid")
-        self.rb_gauss.setChecked(True)
-        self.blur_type_group = QButtonGroup(card_blur)
-        self.blur_type_group.addButton(self.rb_gauss, 0)
-        self.blur_type_group.addButton(self.rb_pixel, 1)
-        self.blur_type_group.addButton(self.rb_solid, 2)
-        rb_row.addWidget(self.rb_gauss); rb_row.addWidget(self.rb_pixel); rb_row.addWidget(self.rb_solid); rb_row.addStretch(1)
-        row_bt = QHBoxLayout(); row_bt.setSpacing(10)
-        row_bt.addWidget(blur_type_label); row_bt.addLayout(rb_row, 1)
-        card_blur.inner_lay.addLayout(row_bt)
-
-        self.blur_strength = QSlider(Qt.Horizontal)
-        self.blur_strength.setMinimum(0); self.blur_strength.setMaximum(100)
-        self.blur_strength_value = getattr(self, "blur_strength_value", 50)
-        self.blur_strength.setValue(self.blur_strength_value)
-        self.blur_strength.valueChanged.connect(self._on_strength_changed)
-        self.lbl_strength_pct = QLabel(f"{self.blur_strength_value}%"); self.lbl_strength_pct.setObjectName("sfPill")
-
-        row_str = QHBoxLayout(); row_str.setSpacing(10)
-        lab_str = QLabel("Strength:"); lab_str.setObjectName("sfField")
-        row_str.addWidget(lab_str); row_str.addWidget(self.blur_strength, 1); row_str.addWidget(self.lbl_strength_pct)
-        card_blur.inner_lay.addLayout(row_str)
-
-        root.addWidget(card_blur)
-
-        # --- 4) Detected Gestures ---
-        card_g = CardSection("Detected Gestures", container)
-        self.gesture_list = QListWidget()
-        # cap height so it’s ~50% shorter
-        self.gesture_list.setMinimumHeight(140)
-        self.gesture_list.setMaximumHeight(280)   # tweak as you like
-
-        # Replace your existing lambda with this:
-        self.gesture_list.itemClicked.connect(
-            lambda it: self.gestureItemClicked.emit(
-                ({"person_id": int(d[0]), "gesture": str(d[1]), "frame": int(d[2]), "bbox": d[3]}
-                if isinstance((d := it.data(Qt.UserRole)), (tuple, list)) and len(d) >= 4 else
-                d if isinstance(d, dict) else
-                (int(d) if isinstance(d, (int, float)) else self.gesture_list.row(it)))
-            )
-        )
-        
-        card_g.inner_lay.addWidget(self.gesture_list)
-        root.addWidget(card_g)          # no stretch on the gestures card
-        root.addStretch(1)              # put remaining space below it
-
-        parent_splitter.addWidget(container)
-        # let the sidebar expand instead of staying fixed
-        # If the video pane was added first, it's index 0 and the sidebar is index 1.
-        try:
-            parent_splitter.setStretchFactor(0, 3)  # video
-            parent_splitter.setStretchFactor(1, 2)  # sidebar (allow growth)
-            # give the splitter an initial layout (adjust numbers if you like)
-            parent_splitter.setSizes([900, 480])    # [video width, sidebar width]
-        except Exception:
-            pass
-        
-
-    
-    def _emit_gesture_payload(self, item):
-        """Emit the stored payload (dict) for a clicked gesture row."""
-        data = item.data(Qt.UserRole) if item is not None else None
-        if data is None:
-            # fallback to row index if someone forgot to set UserRole
-            data = self.gesture_list.row(item)
-        self.gestureItemClicked.emit(data)
-
-
-    
-    def _on_strength_changed(self, v: int):
-        self.blur_strength_value = v
-        if hasattr(self, "lbl_strength_pct"):
-            self.lbl_strength_pct.setText(f"{v}%")
-
-    
-    def create_enhanced_bottom_bar(self, parent_layout):
-        """Create enhanced bottom timeline bar"""
-        bottom_bar = QFrame()
-        bottom_bar.setObjectName("bottom_bar")
-        bottom_layout = QVBoxLayout(bottom_bar)
-        bottom_layout.setContentsMargins(15, 10, 15, 10)
-        bottom_layout.setSpacing(10)
-        
-        # Enhanced time ruler
-        self.time_ruler = EnhancedTimeRuler()
-        bottom_layout.addWidget(self.time_ruler)
-        
-        # Enhanced thumbnails
-        self.thumbnail_scroll = QScrollArea()
-        self.thumbnail_scroll.setFixedHeight(100)
-        self.thumbnail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        self.thumbnail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.thumbnail_scroll.setWidgetResizable(True)
-        
-        thumb_container = QWidget()
-        self.thumbnail_layout = QHBoxLayout(thumb_container)
-        self.thumbnail_layout.setContentsMargins(10, 10, 10, 10)
-        self.thumbnail_layout.setSpacing(10)    
-        self.thumbnail_scroll.setWidget(thumb_container)
-        
-        bottom_layout.addWidget(self.thumbnail_scroll)
-        parent_layout.addWidget(bottom_bar, stretch=0)
-    
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-
-        # keep the import overlay fitting the video area
-        if hasattr(self, 'import_popup'):
-            parent_rect = self.video_display.geometry()
-            margin = 30
-            self.import_popup.setGeometry(
-                parent_rect.x() + margin,
-                parent_rect.y() + margin,
-                parent_rect.width() - 2 * margin,
-                parent_rect.height() - 2 * margin
-            )
-
-        # rescale the currently shown frame to the new label size
-        if hasattr(self, "_last_frame_bgr") and self._last_frame_bgr is not None:
-            rgb = cv2.cvtColor(self._last_frame_bgr, cv2.COLOR_BGR2RGB)
-            h, w, _ = rgb.shape
-            qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
-            pix = QPixmap.fromImage(qimg).scaled(
-                self.video_display.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-        
-
-
-    
-    # All other methods remain the same as original EditorPanel
-
-    def get_detection_params(self):
-        """Return current detection UI knobs in controller-friendly units."""
-        conf_pct = self.conf_slider.value() if hasattr(self, "conf_slider") else 80
-        frame_skip = self.skip_spin.value() if hasattr(self, "skip_spin") else 2
-        return {
-            "confidence": conf_pct / 100.0,   # 0.80 for 80%
-            "frame_skip": int(frame_skip),
-        }  
-
-
-    def set_video_info(self, rotation_angle, total_frames, fps):
-        """Set video information and enable controls"""
-        self.rotation_angle = rotation_angle
-        self.total_frames = total_frames
-        self.fps = fps
-        self.current_frame_idx = 0
-
-        self.slider.setMaximum(max(0, total_frames - 1))
-        self.slider.setEnabled(True)    
-        self.toggle_button.setEnabled(True)
-        self.detect_button.setEnabled(True)
-        self.blur_button.setEnabled(True)
-        self.export_button.setEnabled(True)
-
-        self.time_ruler.setVideoInfo(total_frames, fps)
-        self.core_has_video = True
-        self.import_popup.hide()
-
-        # 🔊 Hook up audio if we already know the file path
-        try:
-            if getattr(self, "video_path", None):
-                self.set_media_source(self.video_path)
-        except Exception:
-            pass
-
-
-        # --- Update the Video Properties pills (FPS / Resolution / Duration) ---
-        try:
-            if hasattr(self, "lbl_fps"):
-                self.lbl_fps.setText(f"{fps:.0f}" if fps else "--")
-
-            if hasattr(self, "lbl_res"):
-                # If you already know width/height here, set them:
-                #   self.lbl_res.setText(f"{self.core.width}×{self.core.height}")
-                # Otherwise show placeholder; we'll fill it on first frame paint.
-                self.lbl_res.setText("--")
-
-            if hasattr(self, "lbl_dur"):
-                duration = (total_frames / fps) if (fps and total_frames) else 0
-                mm = int(duration // 60)
-                ss = int(duration % 60)
-                self.lbl_dur.setText(f"{mm:02d}:{ss:02d}" if duration else "--")
-        except Exception:
-            pass
-
-    #NEW TO HIGHLIGHTER THE PERSON
-    def show_selection_badge(self, text: str):
-        self.selection_badge.setText(text)
-        self.selection_badge.adjustSize()
-        self.selection_badge.show()
-
-    def hide_selection_badge(self):
-        self.selection_badge.hide()
-
-    
-    def display_frame(self, img_bgr, frame_idx: int):
-        """Display video frame (optimized for smooth playback)"""
-        
-        if img_bgr is None:
-            self.video_display.set_frame_qimage(QImage())
-            self.current_frame_idx = -1
-            self.time_ruler.setCurrentFrame(-1)
-            return
-
-        try:
-            # Apply rotation if needed
-            if hasattr(self, 'rotation_angle'):
-                if self.rotation_angle == 90:
-                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
-                elif self.rotation_angle == 180:
-                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_180)
-                elif self.rotation_angle == 270:
-                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            
-            rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb.shape
-            bytes_per_line = ch * w
-            
-            # Ensure contiguous array for performance
-            rgb = np.ascontiguousarray(rgb)
-            
-            # Create QImage with copied data
-            img_bytes = rgb.tobytes()
-            qimg = QImage(img_bytes, w, h, bytes_per_line, QImage.Format_RGB888)
-            qimg = qimg.copy()  # Force deep copy
-
-            # Set aspect ratio only once
-            if not hasattr(self.video_display, '_aspect_set'):
-                self.video_display.set_aspect_from_size(w, h)
-                self.video_display._aspect_set = True
-
-            # Update display
-            self.video_display.set_frame_qimage(qimg)
-            self.current_frame_idx = frame_idx
-            self.time_ruler.setCurrentFrame(frame_idx)
-            
-            # Update slider without triggering signals
-            self.slider.blockSignals(True)
-            self.slider.setValue(frame_idx)
-            self.slider.blockSignals(False)
-
-            # Sync audio only when NOT playing (avoid double-sync during playback)
-            if not getattr(self, 'is_playing', False):
-                self.audio_seek_to_frame(frame_idx, self.fps)
-
-        except Exception as e:
-            print(f"Error displaying frame: {e}")
-            self.video_display.set_frame_qimage(QImage())
-            self.current_frame_idx = -1
-            self.time_ruler.setCurrentFrame(-1)
-    
-
-    
-    def clear_thumbnails(self):
-        """Clear all thumbnails"""
-        if hasattr(self, "thumbnail_labels"):
-            for thumb in self.thumbnail_labels:
-                self.thumbnail_layout.removeWidget(thumb)
-                thumb.deleteLater()
-            self.thumbnail_labels = []
-            self.thumbnail_frame_indices = []
-    
-    def add_thumbnails(self, thumbs):
-        if not hasattr(self, "thumbnail_labels"):
-            self.thumbnail_labels = []
-            self.thumbnail_frame_indices = []
-
-        for idx, thumb_rgb in thumbs:
-            h, w, _ = thumb_rgb.shape
-            bytes_per_line = w * 3
-            qimg = QImage(thumb_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            pix = QPixmap.fromImage(qimg).scaledToHeight(80, Qt.SmoothTransformation)
-
-            thumb_label = QLabel()  # ← QLabel, not VideoViewport
-            thumb_label.setPixmap(pix)
-            thumb_label.setFixedSize(QSize(pix.width(), pix.height()))
-            thumb_label.setCursor(QCursor(Qt.PointingHandCursor))
-            thumb_label.setStyleSheet("""
-                QLabel {
-                    border: 2px solid #4A5568;
-                    border-radius: 6px;
-                    padding: 2px;
-                    background: #2D3748;
-                }
-                QLabel:hover {
-                    border-color: #4FD1C7;
-                    background: #4A5568;
-                }
-            """)
-            thumb_label.mousePressEvent = lambda e, i=idx: self.thumbnailClicked.emit(i)
-
-            shadow = QGraphicsDropShadowEffect()
-            shadow.setBlurRadius(5)
-            shadow.setColor(QColor(0, 0, 0, 100))
-            shadow.setOffset(0, 2)
-            thumb_label.setGraphicsEffect(shadow)
-
-            self.thumbnail_layout.addWidget(thumb_label)
-            self.thumbnail_labels.append(thumb_label)
-            self.thumbnail_frame_indices.append(idx)
-
-    def add_gesture_items(self, segment_starts):
-        """Populate the gesture list with detected frame indices"""
-        self.gesture_list.clear()
-        for idx in segment_starts:
-            t = idx / self.fps if self.fps > 0 else 0
-            mm = int(t // 60)
-            ss = int(t % 60)
-            msec = int((t - int(t)) * 1000)
-            time_str = f"{mm:02}:{ss:02}.{msec:03}"
-            item = QListWidgetItem(f"✋  {time_str}")
-            item.setData(Qt.UserRole, idx)
-            self.gesture_list.addItem(item)
-        # Enable the blur button only if we have gestures
-        self.blur_button.setEnabled(bool(segment_starts))
-
-    def clear_markers(self):
-        """Clear all detected gestures"""
-        self.gesture_list.clear()
-        self.blur_button.setEnabled(False)
-
- 
-
-    def _on_toggle_clicked(self):
-        """Handle Play/Pause toggle with audio debugging"""
-        self.is_playing = not self.is_playing
-        self.playToggled.emit(self.is_playing)
-        self.toggle_button.setText("⏸ Pause" if self.is_playing else "▶ Play")
-
-        print(f"\n=== PLAY/PAUSE DEBUG ===")
-        print(f"Playing: {self.is_playing}")
-        print(f"Current frame: {self.current_frame_idx}")
-        print(f"FPS: {self.fps}")
-        
-        # Debug audio status before attempting to play
-        self.debug_audio_status()
-
-        # 🔊 keep audio in lockstep with video transport
-        if self.is_playing:
-            print(f"Attempting to play audio from frame {self.current_frame_idx}")
-            self.audio_play_from_frame(self.current_frame_idx, self.fps)
-            
-            # Check status after attempting to play
-            print("After play attempt:")
-            self.debug_audio_status()
-        else:
-            print("Pausing audio")
-            self.audio_pause()
-
-
-
-  
-    def _on_timer_tick(self):
-        """Internal timer slot (controller usually drives playback)"""
-        pass
-    # inside EnhancedEditorPanel (or EnhancedVideoEditor), add:
-
-    # ---- Detect (indeterminate)
-    def start_detect_progress(self):
-        self._dlg_detect = PrettyProgress("Processing – StopFilmingMe", "Detecting gestures… Please wait…", self, determinate=False)
-        self._dlg_detect.show(); QApplication.processEvents()
-
-    def finish_detect_progress(self):
-        if hasattr(self, "_dlg_detect"):
-            self._dlg_detect.close(); del self._dlg_detect
-
-    # ---- Export (determinate)
-    def start_export_progress(self):
-        self._dlg_export = PrettyProgress("Exporting – StopFilmingMe", "Writing video file…", self, determinate=True)
-        self._dlg_export.show(); QApplication.processEvents()
-
-    def set_export_progress(self, pct: int):
-        if hasattr(self, "_dlg_export"): self._dlg_export.set_progress(pct); QApplication.processEvents()
-
-    def finish_export_progress(self, success=True):
-        """Finish export progress dialog"""
-        if hasattr(self, "_dlg_export"):
-            self._dlg_export.set_progress(100)
-            if success:
-                self._dlg_export.set_text("Export complete")
-            else:
-                self._dlg_export.set_text("Export failed")
-                
-            QTimer.singleShot(300, lambda: (
-                self._dlg_export.close() if hasattr(self, "_dlg_export") else None,
-                delattr(self, "_dlg_export") if hasattr(self, "_dlg_export") else None
-            ))
-
-    # ---- Blur (determinate; reuse same pattern)
-    # view.py (inside class EditorPanel)
-
-    def start_blur_progress(self):
-        # Same look & behavior as Detecting…
-        self._dlg_blur = ProcessingDialog(
-            parent=self,
-            title="Processing",
-            message="Blurring person in video…",
-            total_steps=100,          # determinate bar (0..100)
-            allow_cancel=False
-        )
-        self._dlg_blur.show()
-        QApplication.processEvents()
-
-    def set_blur_progress(self, pct: int):
-        if hasattr(self, "_dlg_blur") and self._dlg_blur:
-            self._dlg_blur.set_progress(int(max(0, min(100, pct))))
-            QApplication.processEvents()
-
-    def finish_blur_progress(self, success: bool = True):
-        if hasattr(self, "_dlg_blur") and self._dlg_blur:
-            try:
-                self._dlg_blur.finish("Complete" if success else "Failed")
-            finally:
-                self._dlg_blur = None
-
-
-
-
-
+# Enhanced Progress Dialog for unified use
 class PrettyProgress(QDialog):
-    """Unified themed progress dialog with clean, modern styling."""
+    """Unified themed progress dialog with Premiere Pro styling."""
     def __init__(self, title="Processing", text="Please wait…", parent=None, determinate=False):
         super().__init__(parent)
         
-        # Fix: Clean up title
+        # Clean up title
         clean_title = title.replace("StopFilming", "").replace("–", "").strip()
         if not clean_title:
-            clean_title = "StopFilming"
+            clean_title = "StopFilming Pro"
             
         self.setWindowTitle(clean_title)
         self.setModal(True)
-        self.setFixedWidth(460)
+        self.setFixedWidth(480)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         # Layout
         v = QVBoxLayout(self)
-        v.setContentsMargins(20, 20, 20, 20)
+        v.setContentsMargins(24, 20, 24, 20)
         v.setSpacing(12)
 
         # Clean header
         self.header = QLabel(text)
-        self.header.setStyleSheet("""
-            color: #4FD1C7; 
+        self.header.setStyleSheet(f"""
+            color: {ACCENT_LIGHT}; 
             font-weight: 600; 
             font-size: 16px;
             margin-bottom: 4px;
+            font-family: 'Segoe UI', Tahoma, sans-serif;
         """)
         v.addWidget(self.header)
 
@@ -2128,30 +2159,32 @@ class PrettyProgress(QDialog):
         # Time display
         self.time_lbl = QLabel("00:00")
         self.time_lbl.setAlignment(Qt.AlignRight)
-        self.time_lbl.setStyleSheet("color: #A0AEC0; font-size: 12px;")
+        self.time_lbl.setStyleSheet(f"color: {SUBTEXT}; font-size: 12px;")
         v.addWidget(self.time_lbl)
 
-        # Style
-        self.setStyleSheet("""
-            QDialog { 
-                background: #2D3748; 
-                border: 1px solid #4A5568; 
-                border-radius: 12px; 
-            }
-            QProgressBar {
-                height: 24px; 
-                border: 1px solid #4A5568; 
+        # Premiere Pro styling
+        self.setStyleSheet(f"""
+            QDialog {{ 
+                background: {PANEL_BG}; 
+                border: 1px solid {BORDER}; 
                 border-radius: 8px;
-                background: #1A202C; 
+                font-family: 'Segoe UI', Tahoma, sans-serif;
+            }}
+            QProgressBar {{
+                height: 24px; 
+                border: 1px solid {BORDER}; 
+                border-radius: 4px;
+                background: {DARKER_BG}; 
                 text-align: center; 
-                color: #E2E8F0;
-                font-weight: 600;
-            }
-            QProgressBar::chunk {
-                border-radius: 6px;
+                color: {TEXT};
+                font-weight: 500;
+                font-size: 12px;
+            }}
+            QProgressBar::chunk {{
+                border-radius: 3px;
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0, 
-                    stop:0 #4FD1C7, stop:1 #38B2AC);
-            }
+                    stop:0 {ACCENT}, stop:1 {ACCENT_LIGHT});
+            }}
         """)
 
         # Mode setup
@@ -2191,7 +2224,7 @@ class PrettyProgress(QDialog):
     def set_title(self, title):
         clean_title = title.replace("StopFilming", "").replace("–", "").strip()
         if not clean_title:
-            clean_title = "StopFilming"
+            clean_title = "StopFilming Pro"
         self.header.setText(clean_title)
         self.setWindowTitle(clean_title)
 
@@ -2206,30 +2239,8 @@ class PrettyProgress(QDialog):
             self._t.stop()
         super().closeEvent(e)
 
-    def _update_time(self):
-        import time
-        elapsed = int(time.time() - self._since)
-        mm, ss = divmod(elapsed, 60)
-        self.time_lbl.setText(f"{mm:02d}:{ss:02d}")
 
-    def on_export(self,panel, core, out_path):
-        self.panel.start_export_progress()
-        self._exp_thread = QThread(self.panel)
-        self._exp_worker = ExportWorker(self.core, out_path=self._pick_path())
-        self._exp_worker.moveToThread(self._exp_thread)
-
-        self._exp_thread.started.connect(self._exp_worker.run)
-        self._exp_worker.progress.connect(self.panel.set_export_progress)
-        self._exp_worker.finished.connect(lambda ok, p: (self.panel.finish_export_progress(), self._on_export_done(ok, p)))
-        self._exp_worker.error.connect(lambda msg: (self.panel.finish_export_progress(), self._toast(msg)))
-
-        self._exp_worker.finished.connect(self._exp_thread.quit)
-        self._exp_worker.finished.connect(self._exp_worker.deleteLater)
-        self._exp_thread.finished.connect(self._exp_thread.deleteLater)
-
-        self._exp_thread.start()
-
-
+# Worker classes for threaded operations
 class ExportWorker(QObject):
     progress = pyqtSignal(int)     # 0..100
     finished = pyqtSignal(bool, str)  # ok, path
@@ -2254,9 +2265,15 @@ class ExportWorker(QObject):
             self.finished.emit(True, self.out_path)
         except Exception as e:
             self.error.emit(str(e))
+
+
 class DetectWorker(QObject):
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
+
+    def __init__(self, core):
+        super().__init__()
+        self.core = core
 
     @pyqtSlot()
     def run(self):
@@ -2266,67 +2283,53 @@ class DetectWorker(QObject):
         except Exception as e:
             self.error.emit(str(e))
 
-def on_detect(self):
-    self.panel.start_detect_progress()
-    self._det_thread = QThread(self.panel)
-    self._det_worker = DetectWorker()
-    self._det_worker.core = self.core
-    self._det_worker.moveToThread(self._det_thread)
-
-    self._det_thread.started.connect(self._det_worker.run)
-    self._det_worker.finished.connect(lambda segs: (self.panel.finish_detect_progress(), self.panel.add_gesture_items(segs)))
-    self._det_worker.error.connect(lambda msg: (self.panel.finish_detect_progress(), self._toast(msg)))
-
-    self._det_worker.finished.connect(self._det_thread.quit)
-    self._det_worker.finished.connect(self._det_worker.deleteLater)
-    self._det_thread.finished.connect(self._det_thread.deleteLater)
-
-    self._det_thread.start()
 
 class KeyboardShortcutsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Keyboard Shortcuts")
         self.setModal(True)
-        self.setFixedSize(350, 240)
+        self.setFixedSize(380, 280)
         self.setWindowFlags(
             Qt.Dialog
             | Qt.WindowCloseButtonHint
             | Qt.MSWindowsFixedSizeDialogHint
         )
 
-        self.setStyleSheet("""
-            QDialog {
-                background: #1A202C; 
+        self.setStyleSheet(f"""
+            QDialog {{
+                background: {PANEL_BG}; 
+                border: 1px solid {BORDER};
                 border-radius: 8px;
-            }
-            QLabel#header {
+                font-family: 'Segoe UI', Tahoma, sans-serif;
+            }}
+            QLabel#header {{
                 font-size: 16px; 
-                font-weight: bold; 
-                color: #4FD1C7;
-            }
-            QLabel {
-                font-size: 14px; 
-                color: #E2E8F0;
-            }
-            QPushButton {
-                background: #4FD1C7;
-                color: #1A202C;
+                font-weight: 600; 
+                color: {ACCENT_LIGHT};
+            }}
+            QLabel {{
+                font-size: 13px; 
+                color: {TEXT};
+            }}
+            QPushButton {{
+                background: {ACCENT};
+                color: white;
                 border: none;
-                padding: 6px 12px;
+                padding: 8px 16px;
                 border-radius: 4px;
                 font-size: 13px;
                 font-weight: 600;
                 min-width: 80px;
-            }
-            QPushButton:hover {
-                background: #38B2AC;
-            }
+            }}
+            QPushButton:hover {{
+                background: {ACCENT_HOVER};
+            }}
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
 
         header = QLabel("Keyboard Shortcuts", self)
         header.setObjectName("header")
@@ -2336,11 +2339,16 @@ class KeyboardShortcutsDialog(QDialog):
         shortcuts = [
             ("Ctrl+O", "Open Video"),
             ("Ctrl+S", "Save Project"),
+            ("Ctrl+E", "Export Video"),
+            ("Space", "Play/Pause"),
+            ("Ctrl+D", "Detect Gestures"),
+            ("Ctrl+B", "Blur Person"),
+            ("F11", "Toggle Fullscreen"),
             ("Ctrl+Q", "Quit"),
-            ("F11",    "Toggle Fullscreen"),
         ]
+        
         for key, desc in shortcuts:
-            lbl = QLabel(f"<tt>{key}</tt> &nbsp;&nbsp;—&nbsp;&nbsp; {desc}", self)
+            lbl = QLabel(f"<span style='font-family: monospace; background: {DARKER_BG}; padding: 2px 6px; border-radius: 3px;'>{key}</span>  —  {desc}", self)
             layout.addWidget(lbl)
 
         layout.addStretch()
@@ -2350,12 +2358,10 @@ class KeyboardShortcutsDialog(QDialog):
         layout.addWidget(close_btn, alignment=Qt.AlignCenter)
 
 
-
-
 # ============================================================================
 # IMPORTANT: main.py uses EditorPanel, which is aliased to EnhancedEditorPanel
 # The EnhancedVideoEditor class above is NOT used - it's an alternative 
 # implementation with a frameless window and custom title bar.
 # ============================================================================
-#do not delete
+# Alias for compatibility with main.py
 EditorPanel = EnhancedEditorPanel

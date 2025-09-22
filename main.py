@@ -535,26 +535,22 @@ class MainWindow(QMainWindow):
 
         self.editor_panel.show_selection_badge(f"Blurring Person {sel_pid}…")
 
-        # 2) start blur dialog (same look as "Detecting gestures…")
-        self.editor_panel.start_blur_progress()
 
-        # 3) progress callback → updates the same pretty bar
         def _blur_progress_cb(pct: int):
             self.editor_panel.set_blur_progress(int(pct))
 
-
-
         # 4) run your blur routine (pick ONE path)
         #    A) if you blur directly into the preview buffer:
-        ok = self.core.blur_person_in_video(bbox, start_frame=frame_idx,
-                                    progress_callback=_blur_progress_cb)
+        self.editor_panel.start_blur_progress()
+        ok = False
+        try:
+            ok = self.core.blur_person_in_video(
+                bbox, start_frame=frame_idx, progress_callback=_blur_progress_cb
+            )
+        finally:
+            # even if an exception is raised, close the dialog
+            self.editor_panel.finish_blur_progress(bool(ok))
 
-
-        #    B) if you instead render/export the blurred video, use this instead:
-        # ok = self.core.export_video(out_path, progress_cb=_blur_progress_cb)
-
-        # 5) finish dialog once
-        self.editor_panel.finish_blur_progress(bool(ok))
 
         # 6) optional: refresh the preview at the current frame
         img = self.core.get_frame(frame_idx)
