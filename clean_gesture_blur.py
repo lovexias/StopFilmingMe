@@ -19,11 +19,19 @@ from utilities import (
 )
 
 # Configuration
-video_path = "C:\\Users\\Layne\\Desktop\\random\\RECORDINGS[CONFI]\\GH010048COPY.mp4"
+video_path = "D:\\01 KYLE\\School\\College\\4th Year\\3rd Term\\THS-ST2\\RECORDINGS[CONFI]\\RECORDINGS[CONFI]\\GH010109.MP4"  # Input video file path
 GESTURE_TYPE = "wave"  # Change to "hand_over_face" to test the other detector
 OUTPUT_PATH = "clean_blurred_output.mp4"  # Clean output video file name
 SHOW_UI = True  # Set to False to disable real-time UI display
 UI_SCALE_FACTOR = 0.5  # Scale factor for UI display (0.5 = half size for better performance)
+
+# Modify these configuration values
+DISCOVERY_FRAME_SKIP = 70  # Increased from 60 to 90
+ANALYSIS_FRAME_SKIP = 35   # For person analysis from 30 to 60
+GESTURE_DURATION = 3       # Reduced from 3 to 2 seconds
+YOLO_DETECTION_INTERVAL = 10  # Run YOLO every 15 frames instead of 5
+
+mp_pose_global = mp.solutions.pose.Pose()
 
 def draw_person_box(frame, bbox, person_id, status="Detecting", color=(0, 255, 0)):
     """Draw bounding box around detected person with status text."""
@@ -119,7 +127,7 @@ def analyze_person_across_entire_video(video_path, person_tracker, person_id, ge
     
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_skip = 30  # Check every 30 frames for efficiency
+    frame_skip = ANALYSIS_FRAME_SKIP  # For person analysis
     
     gesture_detected_for_person = False
     frames_checked = 0
@@ -196,24 +204,22 @@ def analyze_person_across_entire_video(video_path, person_tracker, person_id, ge
             person_appearances += 1
             person_data = current_people[person_id]
             person_bbox = person_data['bbox']
-            
-            print(f"    🔍 Found Person ID {person_id} at frame {frame_num}, checking for {gesture_type}...")
-            
-            # Show gesture analysis in UI
-            if SHOW_UI:
-                ui_frame = draw_person_box(ui_frame, person_bbox, person_id, "ANALYZING GESTURE...", (255, 255, 0))
-                cv2.putText(ui_frame, f"Checking for {gesture_type}...", (50, 260), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                cv2.putText(ui_frame, "Gesture detection window will open...", (50, 290), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                display_frame = scale_frame_for_display(ui_frame, UI_SCALE_FACTOR)
-                cv2.imshow(f"Analyzing Person {person_id}", display_frame)
-                cv2.waitKey(1000)  # Show for 1 second before opening gesture window
-            
-            # Analyze gesture in this specific occurrence
+
+            # Get keypoints for the person in the bounding box
+            keypoints = get_person_keypoints(frame, person_bbox)
+
+            # Show skeleton popup before gesture analysis
+            if SHOW_UI and keypoints:
+                show_skeleton_popup(frame, person_bbox, keypoints, "Analyzing...")
+
             gesture_detected = detect_gesture_in_person_box(
-                person_bbox, cap, gesture_type, fps, duration_seconds=3
+                person_bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION
             )
+
+            # Show skeleton popup after gesture analysis with result
+            if SHOW_UI and keypoints:
+                gesture_status = "Detected" if gesture_detected else "Not Detected"
+                show_skeleton_popup(frame, person_bbox, keypoints, gesture_status)
             
             if gesture_detected:
                 print(f"    ✅ {gesture_type.replace('_', ' ').title()} detected for Person ID {person_id}!")
@@ -273,7 +279,7 @@ def first_pass_detect_gestures(video_path, fps, rotation):
     print("\n📋 STEP 1: Discovering all unique people in the video...")
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    discovery_frame_skip = 60  # Check every 60 frames to find people
+    discovery_frame_skip = DISCOVERY_FRAME_SKIP  # Increased from 60 to 90
     
     # Discover all unique people
     for frame_count in range(0, total_frames, discovery_frame_skip):
@@ -427,7 +433,7 @@ def second_pass_create_clean_video(video_path, people_to_blur, person_tracker_fr
     print(f"PersonTracker has {len(person_tracker_from_pass1.tracked_people)} people from Pass 1")
     
     # Optimization: Run YOLO detection every N frames
-    yolo_detection_interval = 5  # Run YOLO every 5 frames for better tracking accuracy
+    yolo_detection_interval = YOLO_DETECTION_INTERVAL  # Run YOLO every 15 frames instead of 5
     last_detected_people_with_masks = []  # Cache of last YOLO detections with masks
     
     while cap.isOpened():
@@ -553,6 +559,40 @@ def second_pass_create_clean_video(video_path, people_to_blur, person_tracker_fr
     print(f"- Used PersonTracker for consistent identity matching")
     print(f"- Blurred only Person IDs: {person_ids_to_blur}")
     print(f"- Clean video saved to: {OUTPUT_PATH}")
+
+def show_skeleton_popup(frame, bbox, keypoints, gesture_status):
+    x1, y1, x2, y2 = bbox
+    roi = frame[y1:y2, x1:x2].copy()
+
+    # Draw keypoints
+    for (x, y) in keypoints:
+        cv2.circle(roi, (int(x - x1), int(y - y1)), 5, (0, 255, 0), -1)
+
+    # Draw skeleton connections using MediaPipe's POSE_CONNECTIONS
+    for i, j in mp.solutions.pose.POSE_CONNECTIONS:
+        if i < len(keypoints) and j < len(keypoints):
+            cv2.line(roi, (int(keypoints[i][0] - x1), int(keypoints[i][1] - y1)),
+                          (int(keypoints[j][0] - x1), int(keypoints[j][1] - y1)),
+                          (255, 0, 0), 2)
+
+    # Add gesture status text
+    cv2.putText(roi, f"Gesture: {gesture_status}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+    cv2.imshow("Gesture Detection - Skeleton", roi)
+    cv2.waitKey(500)
+
+def get_person_keypoints(frame, bbox):
+    x1, y1, x2, y2 = bbox
+    roi = frame[y1:y2, x1:x2]
+    results = mp_pose_global.process(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
+    keypoints = []
+    if results.pose_landmarks:
+        for lm in results.pose_landmarks.landmark:
+            kp_x = int(lm.x * (x2 - x1)) + x1
+            kp_y = int(lm.y * (y2 - y1)) + y1
+            keypoints.append((kp_x, kp_y))
+    return keypoints
 
 def main():
     # Get video properties
