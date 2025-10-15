@@ -77,13 +77,13 @@ class BlurPersonWorker(QThread):
         self.sel_pid = sel_pid
 
     def run(self):
-        import cv2
-        # Load video properties
         cap = cv2.VideoCapture(self.core.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         rotation = getattr(self.core, "rotation_angle", 0)
 
-        self.core.blurred_cache.clear()  # Clear any previous blurred frames
+        # Store frames to blur
+        frames_to_blur = []
+        
         for frame_idx in range(total_frames):
             ret, frame = cap.read()
             if not ret:
@@ -97,18 +97,90 @@ class BlurPersonWorker(QThread):
             elif rotation == 270:
                 frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-            # Blur the selected person's face
-            for person in self.core.detected_people:
-                if person["person_id"] == self.sel_pid:
-                    frame = blur_faces_of_person(frame, person["bbox"])
+            # Store frame index for blurring
+            frames_to_blur.append(frame_idx)
+            
+            # Update cache with blurred frame
+            blurred = blur_faces_of_person(frame.copy(), self.bbox)
+            self.core.blurred_cache[frame_idx] = blurred
+            self.core.blurred_frames.add(frame_idx)
 
-            # Cache the blurred frame
-            self.core.blurred_cache[frame_idx] = frame
-
-            # Emit progress
-            self.progress.emit(int(frame_idx / total_frames * 100))
+            # Report progress
+            if frame_idx % 10 == 0:
+                progress = int((frame_idx / total_frames) * 100)
+                self.progress.emit(progress)
 
         cap.release()
+        self.finished.emit()
+
+class CleanBlurWorker(QThread):
+    progress = pyqtSignal(int)
+    finished = pyqtSignal()
+
+    def __init__(self, core, sel_pid):
+        super().__init__()
+        self.core = core
+        self.sel_pid = sel_pid
+
+    def run(self):
+        import cv2, gc, psutil, time
+        from utilities import PersonTracker, detect_multiple_people_yolov8, blur_faces_of_person
+
+        cap = cv2.VideoCapture(self.core.video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+        rotation = getattr(self.core, "rotation_angle", 0)
+        interval = fps  # detect every 1 second
+
+        tracker = PersonTracker(max_disappeared=30)
+        print(f"▶ Clean blur started for Person {self.sel_pid} ({total_frames} frames @ {fps} fps)")
+
+        last_bbox = None
+        for frame_idx in range(total_frames):
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # rotate
+            if rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+            # YOLO + track every 1 s
+            if frame_idx % interval == 0:
+                detections = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+                tracked = tracker.update(frame, detections, frame_idx)
+                if self.sel_pid in tracker.tracked_people:
+                    last_bbox = tracker.tracked_people[self.sel_pid]["bbox"]
+
+            # use last known bbox between intervals
+            if last_bbox is not None:
+                frame = blur_faces_of_person(frame, last_bbox)
+
+            # cache keyframes only (every 15 frames)
+            if frame_idx % 15 == 0:
+                self.core.blurred_cache[frame_idx] = frame
+
+            # emit progress every second
+            if frame_idx % interval == 0:
+                self.progress.emit(int(frame_idx * 100 / total_frames))
+
+            # memory guard
+            mem = psutil.virtual_memory().percent
+            if mem > 85:
+                print(f"⚠ Memory high ({mem:.1f}%) — flushing old cache entries")
+                keys = sorted(self.core.blurred_cache.keys())[:-20]
+                for k in keys:
+                    del self.core.blurred_cache[k]
+                gc.collect()
+
+        cap.release()
+        gc.collect()
+        print(f"✅ Clean blur finished for Person {self.sel_pid}")
+        self.progress.emit(100)
         self.finished.emit()
 
 class GestureDetectWorker(QThread):
@@ -355,21 +427,19 @@ class MainWindow(QMainWindow):
 
     # ---------- Menus and Controller slots ----------
     def _check_memory(self):
-        """Monitor memory usage and show warnings"""
+        """Monitor memory usage and manage cache"""
         try:
             import psutil
-            memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
-            if memory_mb > 2048:  # More than 2GB
-                print(f"⚠️ High memory usage: {memory_mb:.0f}MB")
-                if hasattr(self.core, '_frame_cache'):
-                    self.core._frame_cache.clear()
-                    print("🧹 Cleared frame cache")
-                import gc
-                gc.collect()
-                if memory_mb > 4096:
-                    QMessageBox.warning(self, "Memory Warning", f"High memory usage detected ({memory_mb:.0f}MB).")
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            
+            # Only clear cache if memory usage is very high (>3GB)
+            if memory_mb > 3000:
+                print(f"⚠️ High memory usage: {int(memory_mb)}MB")
+                print("🧹 Clearing frame cache (preserving blurred frames)")
+                self.core.clear_frame_cache()  # Only clears regular frame cache
         except ImportError:
-            pass  # psutil not available
+            pass
 
     # ---------- Controller slots ----------
     def _on_import_requested(self):
@@ -573,9 +643,9 @@ class MainWindow(QMainWindow):
         actual_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
         
         # Debug prints to check cache during playback
-        print(f"Current frame: {actual_pos}")
-        print(f"Is frame in cache? {actual_pos in self.core.blurred_cache}")
-        print(f"Total cached frames: {len(self.core.blurred_cache)}")
+        # print(f"Current frame: {actual_pos}")
+        # print(f"Is frame in cache? {actual_pos in self.core.blurred_cache}")
+        # print(f"Total cached frames: {len(self.core.blurred_cache)}")
         
         if actual_pos in self.core.blurred_cache:
             print(f"Using blurred frame {actual_pos}")
@@ -656,100 +726,43 @@ class MainWindow(QMainWindow):
         selected = self.editor_panel.gesture_list.selectedItems()
         if not selected:
             return
+                
         payload = selected[0].data(Qt.UserRole)
         if not payload:
             return
 
-        frame_idx = int(payload["frame"])
-        sel_pid = payload.get("person_id", "?")
+        # Fix: Handle dictionary payload format correctly
+        if isinstance(payload, dict):
+            frame_idx = payload.get('frame', 0)
+            bbox = payload.get('bbox')
+        else:
+            print(f"Error: Invalid payload format: {payload}")
+            return
 
-        self.editor_panel.show_selection_badge("")
-        self.editor_panel.start_blur_progress()
+        sel_pid = frame_idx  # Use frame index as ID
 
-        def _blur_progress_cb(pct: int):
-            self.editor_panel.set_blur_progress(int(pct))
+        # Show progress dialog
+        self.proc = ProcessingDialog(
+            self, title="Processing – StopFilming",
+            message="Blurring person...",
+            total_steps=100
+        )
+        self.proc.show()
 
-        ok = False
-        try:
-            # Initialize video properties
-            cap = cv2.VideoCapture(self.core.video_path)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            cap.release()
-
-            person_tracker = PersonTracker(max_disappeared=60, feature_threshold=0.7, motion_threshold=200)
-            
-            # Initialize tracking with first detection
-            initial_frame = self.core.get_frame(frame_idx)
-            results = yolo_model(initial_frame)[0]
-            boxes = results.boxes
-            
-            if len(boxes):
-                # Convert YOLO detections to integer coordinates
-                detections = []
-                for box in boxes:
-                    # Convert tensor to numpy and get coordinates
-                    coords = box.xyxy[0].cpu().numpy()
-                    x1, y1, x2, y2 = map(int, coords)
-                    confidence = float(box.conf[0].cpu().numpy())
-                    detections.append(([x1, y1, x2, y2], confidence))
-                
-                initial_people = person_tracker.update(initial_frame, detections, frame_idx)
-                if sel_pid not in initial_people:
-                    print(f"Warning: Could not find person {sel_pid} in initial frame")
-                    return
-
-            print(f"Starting tracking and blurring for person {sel_pid}")
-            # Track and blur through video
-            for current_frame in range(0, total_frames, 5):
-                progress = (current_frame / total_frames) * 100
-                _blur_progress_cb(progress)
-                
-                frame = self.core.get_frame(current_frame)
-                if frame is None:
-                    continue
-
-                results = yolo_model(frame)[0]
-                boxes = results.boxes
-                
-                if len(boxes):
-                    # Convert YOLO detections to integer coordinates
-                    detections = []
-                    for box in boxes:
-                        coords = box.xyxy[0].cpu().numpy()
-                        x1, y1, x2, y2 = map(int, coords)
-                        confidence = float(box.conf[0].cpu().numpy())
-                        detections.append(([x1, y1, x2, y2], confidence))
-                    
-                    current_people = person_tracker.update(frame, detections, current_frame)
-                    
-                    if sel_pid in current_people:
-                        print(f"Found person {sel_pid} in frame {current_frame}")
-                        blurred_frame = frame.copy()
-                        bbox = [int(x) for x in current_people[sel_pid]['bbox']]
-                        blurred_frame = blur_faces_of_person(blurred_frame, bbox)
-                        self.core.blurred_cache[current_frame] = blurred_frame
-                        print(f"Added blurred frame {current_frame} to cache")
-
-            print(f"Final cache size: {len(self.core.blurred_cache)} frames")
-            print(f"First 10 cached frames: {sorted(list(self.core.blurred_cache.keys()))[:10]}")
-            ok = True
-
-        except Exception as e:
-            print(f"Error during blurring: {e}")
-        finally:
-            self.editor_panel.finish_blur_progress(bool(ok))
-            self.editor_panel.show_selection_badge("")
-            self.editor_panel.update()
-
-        # Refresh display
-        img = self.core.get_frame(frame_idx)
-        if frame_idx in self.core.blurred_cache:
-            img = self.core.blurred_cache[frame_idx]
-        self.editor_panel.display_frame(img, frame_idx)
-        self.editor_panel.current_frame_idx = frame_idx
-            
-            # Force a refresh of the display
-        self.editor_panel.update()
+        # Start blur worker
+        self.blur_thread = BlurPersonWorker(self.core, sel_pid)
+        self.blur_thread.bbox = bbox  # Pass bbox to worker
+        
+        # Connect signals
+        self.blur_thread.progress.connect(self.proc.set_progress)
+        self.blur_thread.finished.connect(lambda: (
+            self.proc.close(),
+            self._on_frame_changed(frame_idx),  # Refresh current frame
+            QMessageBox.information(self, "Blurring Complete", 
+                                "Person has been blurred throughout the video.")
+        ))
+        
+        self.blur_thread.start()
 
     def _on_thumbnail_clicked(self, frame_idx: int):
         self.play_timer.stop()

@@ -50,14 +50,22 @@ class EditorCore:
         self.blurred_frames = set()        # set of frame indices
         self.blurred_cache = dict()        # frame_idx -> blurred BGR numpy array
         self._frame_cache = {}  # Simple frame cache
-        self._max_cached_frames = 50
+        self._max_cached_frames = 100 # increased from 50
 
+    def clear_frame_cache(self):
+        """Clear frame cache but preserve blurred frames"""
+        # Only clear regular frame cache, keep blurred frames
+        self._frame_cache.clear()
     
     def get_frame(self, frame_idx: int):
         # Check cache first
         if frame_idx in self._frame_cache:
             return self._frame_cache[frame_idx].copy()
         
+        # Then check regular cache
+        if frame_idx in self._frame_cache:
+            return self._frame_cache[frame_idx].copy()
+
         # Load from video
         if self.cap is None:
             return None
