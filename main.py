@@ -9,7 +9,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
 os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-
+import numpy as np
 import sys
 import webbrowser
 import time
@@ -610,7 +610,7 @@ class MainWindow(QMainWindow):
         cap.release()
 
         print("=" * 70)
-        print("PASS 1: OPTIMIZED GESTURE DETECTION")
+        print("PASS 1: OPTIMIZED GESTURE DETECTION (Improved Skip Logic)")
         print("=" * 70)
         print(f"Video: {video_path}")
         print(f"Total Frames: {total_frames}, FPS: {fps:.2f}, Rotation: {rotation}°")
@@ -650,25 +650,54 @@ class MainWindow(QMainWindow):
                         print(f"  👤 New person detected: ID {pid} @ frame {frame_idx}")
 
             progress = int((frame_idx / total_frames) * 40)
-            self.proc.set_progress(progress)
+            self.proc.set_progress(progress, label=f"Stage 1 – Discovering People: {progress}%")
             self.statusBar().showMessage(f"Discovering people... {progress}%")
             QApplication.processEvents()
 
         cap.release()
         print(f"\n✅ STEP 1 COMPLETE: {len(discovered_people)} people discovered.")
 
-        # STEP 2: Analyze gestures
-        print("\n🔍 STEP 2: Analyzing gestures...")
+               # STEP 2: Analyze gestures
+        print("\n🔍 STEP 2: Analyzing gestures (adaptive clarity filter)...")
         gesture_found_for_person = {pid: False for pid in discovered_people}
+        unclear_face_for_person = {pid: False for pid in discovered_people}
 
         total_to_analyze = len(discovered_people)
         analyzed_count = 0
 
+        # === 🧠 Pre-scan: Estimate average video sharpness & brightness ===
+        print("\n📊 Estimating average video clarity...")
+        cap = cv2.VideoCapture(video_path)
+        sharp_samples, bright_samples = [], []
+        for i in range(0, min(total_frames, 300), max(1, total_frames // 50)):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+            ret, frame = cap.read()
+            if not ret:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            sharp_samples.append(cv2.Laplacian(gray, cv2.CV_64F).var())
+            bright_samples.append(gray.mean())
+        cap.release()
+
+        avg_sharp = np.mean(sharp_samples) if sharp_samples else 50
+        avg_bright = np.mean(bright_samples) if bright_samples else 100
+        print(f"📈 Avg sharpness: {avg_sharp:.1f}, Avg brightness: {avg_bright:.1f}")
+
+        # === 🔧 Adaptive thresholds based on scene ===
+        sharp_thresh = max(10, avg_sharp * 0.4)     # 40% of avg
+        bright_thresh = max(25, avg_bright * 0.5)   # 50% of avg
+        area_thresh = 5000                          # constant minimum box size
+        print(f"🔧 Using thresholds → sharpness<{sharp_thresh:.1f}, brightness<{bright_thresh:.1f}, area<{area_thresh}")
+
         for gesture_type in gestures_to_check:
             print(f"\n🎯 Checking gesture type: {gesture_type}")
             for pid in discovered_people:
-                # Skip if this person already had any gesture detected
+                # Skip if already detected or face unclear
                 if gesture_found_for_person[pid]:
+                    print(f"⏭️ Skipping Person {pid} (already has gesture)")
+                    continue
+                if unclear_face_for_person[pid]:
+                    print(f"🚫 Skipping Person {pid} (face unclear or not visible)")
                     continue
 
                 print(f"  ➤ Analyzing Person {pid} for {gesture_type}...")
@@ -676,6 +705,10 @@ class MainWindow(QMainWindow):
                 cap = cv2.VideoCapture(video_path)
 
                 for frame_num in range(0, total_frames, ANALYSIS_FRAME_SKIP):
+                    # Early skip if already found
+                    if gesture_found_for_person[pid]:
+                        break
+
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
                     ret, frame = cap.read()
                     if not ret:
@@ -697,12 +730,30 @@ class MainWindow(QMainWindow):
                     if pid in current_people:
                         person_data = current_people[pid]
                         bbox = person_data["bbox"]
+                        x1, y1, x2, y2 = map(int, bbox)
+
+                        # 👇 Adaptive clarity check
+                        roi = frame[y1:y2, x1:x2]
+                        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+                        brightness = gray.mean()
+                        area = (x2 - x1) * (y2 - y1)
+
+                        if sharpness < sharp_thresh or brightness < bright_thresh or area < area_thresh:
+                            unclear_face_for_person[pid] = True
+                            print(
+                                f"🚫 Person {pid} face unclear "
+                                f"(sharp={sharpness:.1f}/{sharp_thresh:.1f}, "
+                                f"bright={brightness:.1f}/{bright_thresh:.1f}) – skipping."
+                            )
+                            break  # stop analyzing this person
+
                         detected = detect_gesture_in_person_box(
                             bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION
                         )
                         if detected:
                             gesture_detected = True
-                            gesture_found_for_person[pid] = True  # 🔥 stop further analysis for this person
+                            gesture_found_for_person[pid] = True
                             print(f"    ✅ {gesture_type} detected for Person {pid}")
                             people_to_blur.append({
                                 "person_id": pid,
@@ -710,21 +761,28 @@ class MainWindow(QMainWindow):
                                 "frame": frame_num,
                                 "bbox": bbox
                             })
-                            break  # stop scanning this person further
+                            break
 
                 cap.release()
                 analyzed_count += 1
-                progress = 40 + int((analyzed_count / total_to_analyze) * 60)
-                self.proc.set_progress(progress)
+                progress = max(0, min(100, 40 + int((analyzed_count / total_to_analyze) * 60)))
+                self.proc.set_progress(progress, label=f"Stage 2 – Detecting Gestures: {progress}%")
                 self.statusBar().showMessage(f"Analyzing gestures... {progress}%")
                 QApplication.processEvents()
 
-                # 🔥 Stop early if all people already have gestures
-                if all(gesture_found_for_person.values()):
-                    print("🎉 All people have performed a gesture. Stopping early!")
+                # Stop if all people done or skipped
+                all_done = all(
+                    gesture_found_for_person[pid] or unclear_face_for_person[pid]
+                    for pid in discovered_people
+                )
+                if all_done:
+                    print("🎉 All people processed (gesture or skipped). Stopping early!")
                     break
 
-            if all(gesture_found_for_person.values()):
+            if all(
+                gesture_found_for_person[pid] or unclear_face_for_person[pid]
+                for pid in discovered_people
+            ):
                 break
 
         # Merge duplicates
@@ -754,6 +812,7 @@ class MainWindow(QMainWindow):
         print("=" * 70)
         print("PASS 1 COMPLETE — Ready for blurring.")
         print("=" * 70)
+
 
 
 
