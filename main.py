@@ -238,6 +238,8 @@ class MainWindow(QMainWindow):
 
         # Model
         self.core = EditorCore()
+        # Shared tracker across passes for consistent IDs
+        self.person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
 
         # View
         self.editor_panel = EditorPanel()
@@ -570,51 +572,307 @@ class MainWindow(QMainWindow):
             self.editor_panel.audio_pause()
             return
 
-        actual_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-        
-        # Debug prints to check cache during playback
-        print(f"Current frame: {actual_pos}")
-        print(f"Is frame in cache? {actual_pos in self.core.blurred_cache}")
-        print(f"Total cached frames: {len(self.core.blurred_cache)}")
-        
-        if actual_pos in self.core.blurred_cache:
-            print(f"Using blurred frame {actual_pos}")
-            display_frame = self.core.blurred_cache[actual_pos]
-        else:
-            print(f"Using original frame {actual_pos}")
-            display_frame = self._apply_rotation(frame)
+        frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+        display_frame = self._apply_rotation(frame)
 
-        # Display whichever frame we're using
-        self.editor_panel.display_frame(display_frame, actual_pos)
-        self.editor_panel.current_frame_idx = actual_pos
+        # --- Use blurred frame cache if available ---
+        if hasattr(self, "blur_cache_dir") and hasattr(self, "core"):
+            frame_path = os.path.join(self.blur_cache_dir, f"{frame_idx:06d}.jpg")
+            if frame_idx in self.core.blurred_cache:
+                display_frame = self.core.blurred_cache[frame_idx]
+            elif os.path.exists(frame_path):
+                blurred = cv2.imread(frame_path)
+                self.core.blurred_cache[frame_idx] = blurred
+                display_frame = blurred
+
+            # Keep cache small (±15 frames around current)
+            keys = sorted(self.core.blurred_cache.keys())
+            for k in keys:
+                if abs(k - frame_idx) > 15:
+                    del self.core.blurred_cache[k]
+
+        self.editor_panel.display_frame(display_frame, frame_idx)
+        self.editor_panel.current_frame_idx = frame_idx
+
 
 
     def _on_detect_requested(self):
-        total = self.core.total_frames
-        if total <= 0:
+        """Detect gestures (wave + hand_over_face) and mark people to blur."""
+        if not self.core.video_path:
+            QMessageBox.information(self, "Detection", "No video loaded.")
             return
 
-        if hasattr(self.editor_panel, "get_detection_params"):
-            det_params = self.editor_panel.get_detection_params()
-            if hasattr(self.core, "set_detection_params"):
-                self.core.set_detection_params(
-                    confidence=det_params["confidence"],
-                    frame_skip=det_params["frame_skip"],
-                )
-            else:
-                setattr(self.core, "confidence", det_params["confidence"])
-                setattr(self.core, "frame_skip", det_params["frame_skip"])
+        video_path = self.core.video_path
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        rotation = getattr(self.core, "rotation_angle", 0)
+        cap.release()
 
-        self.proc = ProcessingDialog(
-            self, title="Processing – StopFilming",
-            message="Detecting gestures… Please wait…",
-            total_steps=None
-        )
+        print("=" * 70)
+        print("PASS 1: GESTURE DETECTION – CLEAN LOGIC")
+        print("=" * 70)
+        print(f"Video: {video_path}")
+        print(f"Total Frames: {total_frames}, FPS: {fps:.2f}, Rotation: {rotation}°")
+
+        # Processing dialog for progress
+        self.proc = ProcessingDialog(self, title="Detecting Gestures", message="Analyzing video...", total_steps=100)
         self.proc.show()
+        QApplication.processEvents()
 
-        self.detect_thread = GestureDetectWorker(self.core)
-        self.detect_thread.finished.connect(self._on_gesture_detection_finished)
-        self.detect_thread.start()
+        # Initialize tracker
+        person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
+        discovered_people = []
+        people_to_blur = []
+        gestures_to_check = ["wave", "hand_over_face"]
+
+        # --- STEP 1: Discover all unique people ---
+        print("\n📋 STEP 1: Discovering people...")
+        cap = cv2.VideoCapture(video_path)
+        for frame_idx in range(0, total_frames, DISCOVERY_FRAME_SKIP):
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Apply rotation if necessary
+            if rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+            people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+            if people_detected:
+                current_people = person_tracker.update(frame, people_detected, frame_idx)
+                for pid in current_people.keys():
+                    if pid not in discovered_people:
+                        discovered_people.append(pid)
+                        print(f"  👤 Found new Person ID {pid} at frame {frame_idx}")
+
+            progress = int((frame_idx / total_frames) * 40)
+            self.proc.set_progress(progress)
+            self.statusBar().showMessage(f"Discovering people... {progress}%")
+            QApplication.processEvents()
+
+        cap.release()
+        print(f"\n✅ STEP 1 COMPLETE: {len(discovered_people)} people discovered.")
+
+        # --- STEP 2: Analyze gestures per person ---
+        print("\n🔍 STEP 2: Analyzing gestures for each discovered person...")
+        cap = cv2.VideoCapture(video_path)
+        total_tasks = len(discovered_people) * len(gestures_to_check)
+        task_count = 0
+
+        for gesture_type in gestures_to_check:
+            print(f"\n🎯 Detecting gesture: {gesture_type}")
+            for pid in discovered_people:
+                print(f"  ➤ Analyzing Person ID {pid} for {gesture_type}...")
+                gesture_detected = False
+
+                for frame_num in range(0, total_frames, ANALYSIS_FRAME_SKIP):
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+
+                    if rotation == 90:
+                        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                    elif rotation == 180:
+                        frame = cv2.rotate(frame, cv2.ROTATE_180)
+                    elif rotation == 270:
+                        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+                    people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+                    if not people_detected:
+                        continue
+
+                    current_people = person_tracker.update(frame, people_detected, frame_num)
+                    if pid in current_people:
+                        person_data = current_people[pid]
+                        bbox = person_data['bbox']
+                        detected = detect_gesture_in_person_box(bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION)
+                        if detected:
+                            gesture_detected = True
+                            print(f"    ✅ {gesture_type} detected for Person {pid}")
+                            people_to_blur.append({
+                                'person_id': pid,
+                                'gesture': gesture_type,
+                                'frame': frame_num,
+                                'bbox': bbox
+                            })
+                            break
+
+                if not gesture_detected:
+                    print(f"    ❌ No {gesture_type} detected for Person {pid}")
+
+                task_count += 1
+                progress = 40 + int((task_count / total_tasks) * 60)
+                self.proc.set_progress(progress)
+                self.statusBar().showMessage(f"Analyzing gestures... {progress}%")
+                QApplication.processEvents()
+
+        cap.release()
+
+        # Merge duplicates (one entry per person)
+        unique_people = {p['person_id']: p for p in people_to_blur}
+        people_to_blur = list(unique_people.values())
+
+        print("\n🎉 GESTURE DETECTION COMPLETE:")
+        print(f"- People to blur: {len(people_to_blur)}")
+        print(f"- IDs: {[p['person_id'] for p in people_to_blur]}")
+
+        # Update UI
+        self.editor_panel.gesture_list.clear()
+        for p in people_to_blur:
+            item = QListWidgetItem(f"Person {p['person_id']} - {p['gesture'].title()}")
+            item.setData(Qt.UserRole, p)
+            self.editor_panel.gesture_list.addItem(item)
+
+        has_items = self.editor_panel.gesture_list.count() > 0
+        self.editor_panel.blur_button.setEnabled(has_items)
+        self.statusBar().showMessage(f"Detected {len(people_to_blur)} gesture(s)")
+        if hasattr(self, "proc"):
+            self.proc.finish("Gesture detection complete")
+            self.proc = None
+
+        # Save for next pass
+        self.people_to_blur = people_to_blur
+        self.person_tracker = person_tracker
+        print("=" * 70)
+        print("PASS 1 COMPLETE — Ready for blurring.")
+        print("=" * 70)
+
+
+    def _on_blur_requested(self, _frame_idx_from_button: int):
+        """Blur the selected person and keep all previously blurred people persistent."""
+        import tempfile, gc, cv2, os
+
+        # Ensure gesture detections exist
+        if not hasattr(self, "people_to_blur") or not self.people_to_blur:
+            QMessageBox.information(self, "Blur", "No detected gestures found.")
+            return
+
+        # Ensure a person is selected
+        selected_item = self.editor_panel.gesture_list.currentItem()
+        if not selected_item:
+            QMessageBox.information(self, "Blur", "Please select a person to blur from the list.")
+            return
+
+        selected_data = selected_item.data(Qt.UserRole)
+        if not selected_data or "person_id" not in selected_data:
+            QMessageBox.warning(self, "Blur", "Invalid selection.")
+            return
+
+        selected_pid = selected_data["person_id"]
+        print(f"🎯 Selected person for blurring: ID {selected_pid}")
+
+        # Create the persistent set if not already
+        if not hasattr(self, "persistent_blur_ids"):
+            self.persistent_blur_ids = set()
+        self.persistent_blur_ids.add(selected_pid)
+        print(f"🧩 Current persistent blur IDs: {self.persistent_blur_ids}")
+
+        video_path = self.core.video_path
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        rotation = getattr(self.core, "rotation_angle", 0)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        self.editor_panel.start_blur_progress()
+        QApplication.processEvents()
+
+        # Reuse or create disk cache
+        if not hasattr(self, "blur_cache_dir"):
+            import tempfile
+            self.blur_cache_dir = tempfile.mkdtemp(prefix="blur_cache_")
+        cache_dir = self.blur_cache_dir
+        print(f"📁 Using cache directory: {cache_dir}")
+
+        self.core.blurred_cache.clear()
+        print(f"Blurring all persistent Person IDs: {self.persistent_blur_ids}")
+
+        # Reset tracker disappeared counts
+        for pid in self.person_tracker.tracked_people:
+            self.person_tracker.tracked_people[pid]["disappeared"] = 0
+
+        detection_interval = YOLO_DETECTION_INTERVAL
+        last_tracked_people = {}
+        frame_idx = 0
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Apply rotation
+            if rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+            # Run YOLO every N frames
+            if frame_idx % detection_interval == 0:
+                people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+                if people_detected:
+                    current_people = self.person_tracker.update(frame, people_detected, frame_idx)
+                    last_tracked_people = current_people.copy()
+                else:
+                    current_people = last_tracked_people.copy()
+            else:
+                current_people = last_tracked_people.copy()
+
+            blurred_frame = frame.copy()
+
+            # Blur all currently persistent people
+            for pid, pdata in current_people.items():
+                if pid in self.persistent_blur_ids:
+                    bbox = pdata["bbox"]
+                    blurred_frame = blur_faces_of_person(blurred_frame, bbox)
+
+            # Save blurred frame to cache
+            frame_path = os.path.join(cache_dir, f"{frame_idx:06d}.jpg")
+            cv2.imwrite(frame_path, blurred_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+            # Keep small memory window
+            self.core.blurred_cache[frame_idx] = blurred_frame
+            if len(self.core.blurred_cache) > 20:
+                oldest_key = min(self.core.blurred_cache.keys())
+                del self.core.blurred_cache[oldest_key]
+
+            # Progress feedback
+            if frame_idx % 50 == 0:
+                progress = int((frame_idx / total_frames) * 100)
+                self.editor_panel.set_blur_progress(progress)
+                self.statusBar().showMessage(
+                    f"Blurring IDs {list(self.persistent_blur_ids)}... {progress}%"
+                )
+                QApplication.processEvents()
+
+            if frame_idx % 300 == 0:
+                gc.collect()
+
+            frame_idx += 1
+
+        cap.release()
+        gc.collect()
+
+        print(f"\n🎉 COMPLETE! Persistent blur IDs now: {self.persistent_blur_ids}")
+        print(f"Frames stored in cache: {cache_dir}")
+
+        self.editor_panel.finish_blur_progress(True)
+        self.editor_panel.update()
+        self.statusBar().showMessage(
+            f"Blurring updated for {len(self.persistent_blur_ids)} person(s)"
+        )
+        QMessageBox.information(
+            self, "Blur Updated",
+            f"Blurring complete for Person {selected_pid}.\n"
+            f"Now blurring {len(self.persistent_blur_ids)} person(s) in total."
+        )
+
 
     def _on_gesture_detection_finished(self, people_with_gestures):
         """Handle completion of gesture detection."""
@@ -651,105 +909,6 @@ class MainWindow(QMainWindow):
         has_items = self.editor_panel.gesture_list.count() > 0
         self.editor_panel.blur_button.setEnabled(has_items)
         self.statusBar().showMessage(f"Detected {self.editor_panel.gesture_list.count()} gesture(s)")
-
-    def _on_blur_requested(self, _frame_idx_from_button: int):
-        selected = self.editor_panel.gesture_list.selectedItems()
-        if not selected:
-            return
-        payload = selected[0].data(Qt.UserRole)
-        if not payload:
-            return
-
-        frame_idx = int(payload["frame"])
-        sel_pid = payload.get("person_id", "?")
-
-        self.editor_panel.show_selection_badge("")
-        self.editor_panel.start_blur_progress()
-
-        def _blur_progress_cb(pct: int):
-            self.editor_panel.set_blur_progress(int(pct))
-
-        ok = False
-        try:
-            # Initialize video properties
-            cap = cv2.VideoCapture(self.core.video_path)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            cap.release()
-
-            person_tracker = PersonTracker(max_disappeared=60, feature_threshold=0.7, motion_threshold=200)
-            
-            # Initialize tracking with first detection
-            initial_frame = self.core.get_frame(frame_idx)
-            results = yolo_model(initial_frame)[0]
-            boxes = results.boxes
-            
-            if len(boxes):
-                # Convert YOLO detections to integer coordinates
-                detections = []
-                for box in boxes:
-                    # Convert tensor to numpy and get coordinates
-                    coords = box.xyxy[0].cpu().numpy()
-                    x1, y1, x2, y2 = map(int, coords)
-                    confidence = float(box.conf[0].cpu().numpy())
-                    detections.append(([x1, y1, x2, y2], confidence))
-                
-                initial_people = person_tracker.update(initial_frame, detections, frame_idx)
-                if sel_pid not in initial_people:
-                    print(f"Warning: Could not find person {sel_pid} in initial frame")
-                    return
-
-            print(f"Starting tracking and blurring for person {sel_pid}")
-            # Track and blur through video
-            for current_frame in range(0, total_frames, 5):
-                progress = (current_frame / total_frames) * 100
-                _blur_progress_cb(progress)
-                
-                frame = self.core.get_frame(current_frame)
-                if frame is None:
-                    continue
-
-                results = yolo_model(frame)[0]
-                boxes = results.boxes
-                
-                if len(boxes):
-                    # Convert YOLO detections to integer coordinates
-                    detections = []
-                    for box in boxes:
-                        coords = box.xyxy[0].cpu().numpy()
-                        x1, y1, x2, y2 = map(int, coords)
-                        confidence = float(box.conf[0].cpu().numpy())
-                        detections.append(([x1, y1, x2, y2], confidence))
-                    
-                    current_people = person_tracker.update(frame, detections, current_frame)
-                    
-                    if sel_pid in current_people:
-                        print(f"Found person {sel_pid} in frame {current_frame}")
-                        blurred_frame = frame.copy()
-                        bbox = [int(x) for x in current_people[sel_pid]['bbox']]
-                        blurred_frame = blur_faces_of_person(blurred_frame, bbox)
-                        self.core.blurred_cache[current_frame] = blurred_frame
-                        print(f"Added blurred frame {current_frame} to cache")
-
-            print(f"Final cache size: {len(self.core.blurred_cache)} frames")
-            print(f"First 10 cached frames: {sorted(list(self.core.blurred_cache.keys()))[:10]}")
-            ok = True
-
-        except Exception as e:
-            print(f"Error during blurring: {e}")
-        finally:
-            self.editor_panel.finish_blur_progress(bool(ok))
-            self.editor_panel.show_selection_badge("")
-            self.editor_panel.update()
-
-        # Refresh display
-        img = self.core.get_frame(frame_idx)
-        if frame_idx in self.core.blurred_cache:
-            img = self.core.blurred_cache[frame_idx]
-        self.editor_panel.display_frame(img, frame_idx)
-        self.editor_panel.current_frame_idx = frame_idx
-            
-            # Force a refresh of the display
-        self.editor_panel.update()
 
     def _on_thumbnail_clicked(self, frame_idx: int):
         self.play_timer.stop()

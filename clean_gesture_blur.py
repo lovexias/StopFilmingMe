@@ -19,7 +19,7 @@ from utilities import (
 )
 
 # Configuration
-video_path = "D:\\01 KYLE\\School\\College\\4th Year\\3rd Term\\THS-ST2\\RECORDINGS[CONFI]\\RECORDINGS[CONFI]\\GH010109.MP4"  # Input video file path
+video_path = "D:\\Portrait_Moving.mp4"  # Input video file path
 GESTURE_TYPE = "wave"  # Change to "hand_over_face" to test the other detector
 OUTPUT_PATH = "clean_blurred_output.mp4"  # Clean output video file name
 SHOW_UI = True  # Set to False to disable real-time UI display
@@ -29,7 +29,7 @@ UI_SCALE_FACTOR = 0.5  # Scale factor for UI display (0.5 = half size for better
 DISCOVERY_FRAME_SKIP = 70  # Increased from 60 to 90
 ANALYSIS_FRAME_SKIP = 35   # For person analysis from 30 to 60
 GESTURE_DURATION = 3       # Reduced from 3 to 2 seconds
-YOLO_DETECTION_INTERVAL = 10  # Run YOLO every 15 frames instead of 5
+YOLO_DETECTION_INTERVAL = 5  # Run YOLO every 15 frames instead of 5
 
 mp_pose_global = mp.solutions.pose.Pose()
 
