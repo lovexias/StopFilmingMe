@@ -597,7 +597,7 @@ class MainWindow(QMainWindow):
 
 
     def _on_detect_requested(self):
-        """Detect gestures (wave + hand_over_face) and mark people to blur."""
+        """Optimized gesture detection – stops analyzing a person once any gesture is detected."""
         if not self.core.video_path:
             QMessageBox.information(self, "Detection", "No video loaded.")
             return
@@ -610,23 +610,22 @@ class MainWindow(QMainWindow):
         cap.release()
 
         print("=" * 70)
-        print("PASS 1: GESTURE DETECTION – CLEAN LOGIC")
+        print("PASS 1: OPTIMIZED GESTURE DETECTION")
         print("=" * 70)
         print(f"Video: {video_path}")
         print(f"Total Frames: {total_frames}, FPS: {fps:.2f}, Rotation: {rotation}°")
 
-        # Processing dialog for progress
+        # Processing dialog
         self.proc = ProcessingDialog(self, title="Detecting Gestures", message="Analyzing video...", total_steps=100)
         self.proc.show()
         QApplication.processEvents()
 
-        # Initialize tracker
         person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
         discovered_people = []
         people_to_blur = []
         gestures_to_check = ["wave", "hand_over_face"]
 
-        # --- STEP 1: Discover all unique people ---
+        # STEP 1: Discover people
         print("\n📋 STEP 1: Discovering people...")
         cap = cv2.VideoCapture(video_path)
         for frame_idx in range(0, total_frames, DISCOVERY_FRAME_SKIP):
@@ -634,7 +633,7 @@ class MainWindow(QMainWindow):
             if not ret:
                 break
 
-            # Apply rotation if necessary
+            # Rotate if needed
             if rotation == 90:
                 frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             elif rotation == 180:
@@ -648,7 +647,7 @@ class MainWindow(QMainWindow):
                 for pid in current_people.keys():
                     if pid not in discovered_people:
                         discovered_people.append(pid)
-                        print(f"  👤 Found new Person ID {pid} at frame {frame_idx}")
+                        print(f"  👤 New person detected: ID {pid} @ frame {frame_idx}")
 
             progress = int((frame_idx / total_frames) * 40)
             self.proc.set_progress(progress)
@@ -658,17 +657,23 @@ class MainWindow(QMainWindow):
         cap.release()
         print(f"\n✅ STEP 1 COMPLETE: {len(discovered_people)} people discovered.")
 
-        # --- STEP 2: Analyze gestures per person ---
-        print("\n🔍 STEP 2: Analyzing gestures for each discovered person...")
-        cap = cv2.VideoCapture(video_path)
-        total_tasks = len(discovered_people) * len(gestures_to_check)
-        task_count = 0
+        # STEP 2: Analyze gestures
+        print("\n🔍 STEP 2: Analyzing gestures...")
+        gesture_found_for_person = {pid: False for pid in discovered_people}
+
+        total_to_analyze = len(discovered_people)
+        analyzed_count = 0
 
         for gesture_type in gestures_to_check:
-            print(f"\n🎯 Detecting gesture: {gesture_type}")
+            print(f"\n🎯 Checking gesture type: {gesture_type}")
             for pid in discovered_people:
-                print(f"  ➤ Analyzing Person ID {pid} for {gesture_type}...")
+                # Skip if this person already had any gesture detected
+                if gesture_found_for_person[pid]:
+                    continue
+
+                print(f"  ➤ Analyzing Person {pid} for {gesture_type}...")
                 gesture_detected = False
+                cap = cv2.VideoCapture(video_path)
 
                 for frame_num in range(0, total_frames, ANALYSIS_FRAME_SKIP):
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
@@ -676,6 +681,7 @@ class MainWindow(QMainWindow):
                     if not ret:
                         break
 
+                    # Rotate
                     if rotation == 90:
                         frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
                     elif rotation == 180:
@@ -690,36 +696,43 @@ class MainWindow(QMainWindow):
                     current_people = person_tracker.update(frame, people_detected, frame_num)
                     if pid in current_people:
                         person_data = current_people[pid]
-                        bbox = person_data['bbox']
-                        detected = detect_gesture_in_person_box(bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION)
+                        bbox = person_data["bbox"]
+                        detected = detect_gesture_in_person_box(
+                            bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION
+                        )
                         if detected:
                             gesture_detected = True
+                            gesture_found_for_person[pid] = True  # 🔥 stop further analysis for this person
                             print(f"    ✅ {gesture_type} detected for Person {pid}")
                             people_to_blur.append({
-                                'person_id': pid,
-                                'gesture': gesture_type,
-                                'frame': frame_num,
-                                'bbox': bbox
+                                "person_id": pid,
+                                "gesture": gesture_type,
+                                "frame": frame_num,
+                                "bbox": bbox
                             })
-                            break
+                            break  # stop scanning this person further
 
-                if not gesture_detected:
-                    print(f"    ❌ No {gesture_type} detected for Person {pid}")
-
-                task_count += 1
-                progress = 40 + int((task_count / total_tasks) * 60)
+                cap.release()
+                analyzed_count += 1
+                progress = 40 + int((analyzed_count / total_to_analyze) * 60)
                 self.proc.set_progress(progress)
                 self.statusBar().showMessage(f"Analyzing gestures... {progress}%")
                 QApplication.processEvents()
 
-        cap.release()
+                # 🔥 Stop early if all people already have gestures
+                if all(gesture_found_for_person.values()):
+                    print("🎉 All people have performed a gesture. Stopping early!")
+                    break
 
-        # Merge duplicates (one entry per person)
-        unique_people = {p['person_id']: p for p in people_to_blur}
+            if all(gesture_found_for_person.values()):
+                break
+
+        # Merge duplicates
+        unique_people = {p["person_id"]: p for p in people_to_blur}
         people_to_blur = list(unique_people.values())
 
-        print("\n🎉 GESTURE DETECTION COMPLETE:")
-        print(f"- People to blur: {len(people_to_blur)}")
+        print("\n🎉 DETECTION COMPLETE:")
+        print(f"- Total people with gestures: {len(people_to_blur)}")
         print(f"- IDs: {[p['person_id'] for p in people_to_blur]}")
 
         # Update UI
@@ -736,12 +749,12 @@ class MainWindow(QMainWindow):
             self.proc.finish("Gesture detection complete")
             self.proc = None
 
-        # Save for next pass
         self.people_to_blur = people_to_blur
         self.person_tracker = person_tracker
         print("=" * 70)
         print("PASS 1 COMPLETE — Ready for blurring.")
         print("=" * 70)
+
 
 
     def _on_blur_requested(self, _frame_idx_from_button: int):
