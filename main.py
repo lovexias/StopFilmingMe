@@ -30,8 +30,10 @@ from model import EditorCore
 from utilities import (
     PersonTracker,
     detect_multiple_people_yolov8,
-    detect_gesture_in_person_box
+    detect_gesture_in_person_box,
+    blur_faces_of_person,   # <-- add this
 )
+
 
 # Add these constants
 DISCOVERY_FRAME_SKIP = 70
@@ -44,27 +46,6 @@ orb = cv2.ORB_create(nfeatures=500)
 bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 # Load YOLO segmentation model
 yolo_model = YOLO('yolov8m-seg.pt')
-
-# ---- Function to blur the face of a person ----
-def blur_faces_of_person(frame, bbox):
-    """
-    This function blurs the face within the bounding box.
-    """
-    # Ensure bbox is a tuple and unpack it properly
-    if isinstance(bbox, (tuple, list)) and len(bbox) == 4:
-        x1, y1, x2, y2 = bbox
-    else:
-        print(f"Error: Bounding box is not a tuple or list with 4 values, it's {type(bbox)}: {bbox}")
-        return frame
-
-    # Apply Gaussian blur to the face region
-    face_roi = frame[y1:y2, x1:x2]  # Extract the face region
-    blurred_face = cv2.GaussianBlur(face_roi, (99, 99), 30)
-
-    # Place the blurred face back into the frame
-    frame[y1:y2, x1:x2] = blurred_face
-
-    return frame
 
 # ---------------- Workers ----------------
 class BlurPersonWorker(QThread):
@@ -86,8 +67,8 @@ class BlurPersonWorker(QThread):
         rotation = getattr(self.core, "rotation_angle", 0)
 
         # clear previous results
-        self.core.blurred_cache.clear()
-        self.core.blurred_frames.clear()
+        #elf.core.blurred_cache.clear()
+        #elf.core.blurred_frames.clear()
 
         # reference bbox for the selected person (from the detection pass)
         ref_bbox = None
@@ -122,21 +103,32 @@ class BlurPersonWorker(QThread):
                 frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
             # detect people on this frame
-            candidates = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+            # NEW
+          
+            dets = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
 
-            # choose which bbox to blur this frame:
+            # robustly pull bboxes whether det is (bbox, mask) or bbox
+            bboxes = []
+            for d in dets:
+                if isinstance(d, (tuple, list)) and len(d) >= 1 and isinstance(d[0], (tuple, list)):
+                    bb = d[0]
+                else:
+                    bb = d
+                bboxes.append(tuple(map(int, bb)))
+
             blur_bbox = None
-            if ref_bbox and candidates:
-                # match the candidate with highest IoU to our reference bbox
-                blur_bbox = max(candidates, key=lambda b: iou(ref_bbox, b))
-                # optional: require a small overlap to avoid false matches
+            if ref_bbox and bboxes:
+                blur_bbox = max(bboxes, key=lambda bb: iou(ref_bbox, bb))
                 if iou(ref_bbox, blur_bbox) < 0.05:
                     blur_bbox = None
 
             if blur_bbox is not None:
-                frame = blur_faces_of_person(frame, blur_bbox)
-                self.core.blurred_cache[frame_idx] = frame
-                self.core.blurred_frames.add(frame_idx)  # ← CRITICAL
+                # AFTER
+                base = self.core.blurred_cache.get(frame_idx, frame)
+                out  = blur_faces_of_person(base, blur_bbox)
+                self.core.blurred_cache[frame_idx] = out
+                self.core.blurred_frames.add(frame_idx)
+
             # progress
             self.progress.emit(int(frame_idx / max(1, total_frames) * 100))
 
@@ -414,7 +406,22 @@ class MainWindow(QMainWindow):
         )
         if not vid_path:
             return
+        # Stop timers/audio tied to the previous video
+        self.play_timer.stop()
+        try:
+            self.editor_panel.audio_pause()
+        except Exception:
+            pass
 
+        # Ensure the previous cap is closed before opening a new one
+        if getattr(self.core, "cap", None) is not None:
+            try:
+                self.core.cap.release()
+            except Exception:
+                pass
+            self.core.cap = None
+
+        
         meta = self.core.load_video(vid_path)
         old_panel = self.editor_panel
         if hasattr(old_panel, 'cleanup_audio_resources'):
@@ -455,7 +462,7 @@ class MainWindow(QMainWindow):
         self.repaint()
         QApplication.processEvents()
 
-    # ---------- Other functions remain unchanged...
+
 
    
     # main.py — inside class MainWindow
@@ -539,7 +546,7 @@ class MainWindow(QMainWindow):
 
     def _on_clear_blurs(self):
         self.core.blurred_frames.clear()
-        self.core.blurred_cache.clear()
+       #self.core.blurred_cache.clear()
         self.editor_panel.clear_markers()
         self.editor_panel.blur_button.setEnabled(False)
 
@@ -628,8 +635,9 @@ class MainWindow(QMainWindow):
         display_frame = self._apply_rotation(frame)
 
         # --- Use blurred frame cache if available ---
-        if hasattr(self, "blur_cache_dir") and hasattr(self, "core"):
-            frame_path = os.path.join(self.blur_cache_dir, f"{frame_idx:06d}.jpg")
+        # NEW
+        if hasattr(self.core, "blur_cache_dir") and os.path.exists(self.core.blur_cache_dir):
+            frame_path = os.path.join(self.core.blur_cache_dir, f"{frame_idx:06d}.jpg")
             if frame_idx in self.core.blurred_cache:
                 display_frame = self.core.blurred_cache[frame_idx]
             elif os.path.exists(frame_path):
@@ -879,25 +887,58 @@ class MainWindow(QMainWindow):
             return
 
         # (B) No selection
-        selected_item = self.editor_panel.gesture_list.currentItem()
-        if not selected_item:
-            self._toast("Please select a person to blur from the list.", title="Blur – StopFilming")
+        selected_items = self.editor_panel.gesture_list.selectedItems()
+        if not selected_items:
+            self._toast("Select one or more people from the list.", title="Blur – StopFilming")
             return
 
+        # Collect selected IDs (+ seed bboxes if available from the item)
+        selected_pairs = []  # list[(pid, bbox or (0,0,0,0))]
+        for it in selected_items:
+            data = it.data(Qt.UserRole) or {}
+            if "person_id" in data:
+                pid = int(data["person_id"])
+                bb  = tuple(map(int, data.get("bbox", (0,0,0,0))))
+                selected_pairs.append((pid, bb))
 
-        selected_data = selected_item.data(Qt.UserRole)
-        if not selected_data or "person_id" not in selected_data:
-            QMessageBox.warning(self, "Blur", "Invalid selection.")
-            return
+        selected_ids = [pid for pid, _ in selected_pairs]
+        print(f"🎯 Selected people for blurring: IDs {selected_ids}")
 
-        selected_pid = selected_data["person_id"]
-        print(f"🎯 Selected person for blurring: ID {selected_pid}")
+        # --- take a snapshot of the IDs that were already baked into the cache ---
+        prev_ids = set(getattr(self, "persistent_blur_ids", set()))
+
+        # ensure the persistent set exists, then add the user’s new selections
+        if not hasattr(self, "persistent_blur_ids"):
+            self.persistent_blur_ids = set()
+        self.persistent_blur_ids.update(selected_ids)
+
+        # these are the *new* people to blur in this pass
+        new_ids = set(self.persistent_blur_ids) - prev_ids
+
+        print(f"Prev IDs: {sorted(prev_ids)}")
+        print(f"Selected IDs this pass: {sorted(selected_ids)}")
+        print(f"New IDs to blur this pass: {sorted(new_ids)}")
+
+
+
+        def _iou(a, b):
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            inter_x1, inter_y1 = max(ax1, bx1), max(ay1, by1)
+            inter_x2, inter_y2 = min(ax2, bx2), min(ay2, by2)
+            iw, ih = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
+            inter = iw * ih
+            if inter <= 0: return 0.0
+            area_a = (ax2-ax1)*(ay2-ay1); area_b = (bx2-bx1)*(by2-by1)
+            return inter / float(area_a + area_b - inter + 1e-6)
 
         # Create the persistent set if not already
         if not hasattr(self, "persistent_blur_ids"):
             self.persistent_blur_ids = set()
-        self.persistent_blur_ids.add(selected_pid)
-        print(f"🧩 Current persistent blur IDs: {self.persistent_blur_ids}")
+        for pid in selected_ids:
+            self.persistent_blur_ids.add(pid)
+        print(f"🧩 Current persistent blur IDs: {sorted(self.persistent_blur_ids)}")
+
 
         video_path = self.core.video_path
         cap = cv2.VideoCapture(video_path)
@@ -909,13 +950,15 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         # Reuse or create disk cache
-        if not hasattr(self, "blur_cache_dir"):
+        # NEW (cache lives on the core so export can see it)
+        if not hasattr(self.core, "blur_cache_dir"):
             import tempfile
-            self.blur_cache_dir = tempfile.mkdtemp(prefix="blur_cache_")
-        cache_dir = self.blur_cache_dir
+            self.core.blur_cache_dir = tempfile.mkdtemp(prefix="blur_cache_")
+        cache_dir = self.core.blur_cache_dir
+
         print(f"📁 Using cache directory: {cache_dir}")
 
-        self.core.blurred_cache.clear()
+       #self.core.blurred_cache.clear()
         print(f"Blurring all persistent Person IDs: {self.persistent_blur_ids}")
 
         # Reset tracker disappeared counts
@@ -925,6 +968,35 @@ class MainWindow(QMainWindow):
         detection_interval = YOLO_DETECTION_INTERVAL
         last_tracked_people = {}
         frame_idx = 0
+
+        
+       
+        # per-person reference bboxes (one time per call)
+        if not hasattr(self, "ref_bbox_for"):
+            self.ref_bbox_for = {}
+
+        seed_map = {pid: bb for pid, bb in selected_pairs}  # you already have this
+        for pid in self.persistent_blur_ids:
+            if pid not in self.ref_bbox_for or self.ref_bbox_for[pid] == (0,0,0,0):
+                pdata = self.person_tracker.tracked_people.get(pid, {})
+                self.ref_bbox_for[pid] = seed_map.get(
+                    pid,
+                    tuple(map(int, pdata.get("bbox", (0,0,0,0))))
+                )
+
+
+
+        def _best_match_bbox(ref_bb, current_people_dict):
+            """Return (pid, bbox, iou) of best match against ref_bb with small IoU gate."""
+            if ref_bb == (0,0,0,0) or not current_people_dict:
+                return None, None, 0.0
+            best_pid, best_bb, best_iou = None, None, 0.0
+            for pid, pdata in current_people_dict.items():
+                bb = tuple(map(int, pdata["bbox"]))
+                i = _iou(ref_bb, bb)
+                if i > best_iou:
+                    best_pid, best_bb, best_iou = pid, bb, i
+            return best_pid, best_bb, best_iou
 
         while True:
             ret, frame = cap.read()
@@ -950,21 +1022,44 @@ class MainWindow(QMainWindow):
             else:
                 current_people = last_tracked_people.copy()
 
-            blurred_frame = frame.copy()
+            # Use previously blurred frame as the base if it exists, so older blurs persist.
+            frame_path = os.path.join(cache_dir, f"{frame_idx:06d}.jpg")
+            if os.path.exists(frame_path):
+                base = cv2.imread(frame_path)     # already has all *previous* people
+            else:
+                base = frame.copy()
 
-            # Blur all currently persistent people
-            for pid, pdata in current_people.items():
-                if pid in self.persistent_blur_ids:
-                    bbox = pdata["bbox"]
-                    blurred_frame = blur_faces_of_person(blurred_frame, bbox)
+            blurred_frame = base
+
+           # Blur only the NEW people for this pass; old ones are already in 'base'
+            for pid in list(new_ids):
+                ref_bb = self.ref_bbox_for.get(pid, (0,0,0,0))
+                match_pid, match_bb, match_iou = _best_match_bbox(ref_bb, current_people)
+
+                # fallback: nearest center if IoU small
+                if (match_bb is None or match_iou < 0.02) and current_people and ref_bb != (0,0,0,0):
+                    (rx1, ry1, rx2, ry2) = ref_bb
+                    rcx, rcy = (rx1+rx2)/2.0, (ry1+ry2)/2.0
+                    def _center(b):
+                        x1,y1,x2,y2 = b; return ((x1+x2)/2.0, (y1+y2)/2.0)
+                    best = None; best_d = 1e18
+                    for _, pdata in current_people.items():
+                        b = tuple(map(int, pdata["bbox"]))
+                        cx, cy = _center(b); d = (cx-rcx)**2 + (cy-rcy)**2
+                        if d < best_d: best, best_d = b, d
+                    match_bb = best
+
+                if match_bb is not None:
+                    blurred_frame = blur_faces_of_person(blurred_frame, match_bb)
+                    self.ref_bbox_for[pid] = match_bb
+
 
             # Save blurred frame to cache
             frame_path = os.path.join(cache_dir, f"{frame_idx:06d}.jpg")
             cv2.imwrite(frame_path, blurred_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
-            # Keep small memory window
             self.core.blurred_cache[frame_idx] = blurred_frame
-            self.core.blurred_frames.add(frame_idx) # new for exporting
+            self.core.blurred_frames.add(frame_idx)
             if len(self.core.blurred_cache) > 20:
                 oldest_key = min(self.core.blurred_cache.keys())
                 del self.core.blurred_cache[oldest_key]
@@ -983,10 +1078,12 @@ class MainWindow(QMainWindow):
 
             frame_idx += 1
 
+
         cap.release()
         gc.collect()
 
-        print(f"\n🎉 COMPLETE! Persistent blur IDs now: {self.persistent_blur_ids}")
+        # --- UI updates (multi-select safe) ---
+        print(f"\n🎉 COMPLETE! Persistent blur IDs now: {sorted(self.persistent_blur_ids)}")
         print(f"Frames stored in cache: {cache_dir}")
 
         self.editor_panel.finish_blur_progress(True)
@@ -994,8 +1091,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Blurring updated for {len(self.persistent_blur_ids)} person(s)"
         )
+
+        # Build a friendly list of the just-processed IDs
+        try:
+            sel_str = ", ".join(map(str, selected_ids))  # selected_ids was created earlier
+        except NameError:
+            # Fallback if the name ever changes
+            sel_str = "selected people"
+
         self._toast(
-            f"Blurring complete for Person {selected_pid}. "
+            f"Blurring complete for {sel_str}. "
             f"Now blurring {len(self.persistent_blur_ids)} person(s) in total.",
             title="Blur Updated – StopFilming"
         )

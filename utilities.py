@@ -30,7 +30,7 @@ DEBUG_TRACKING = True
 next_person_id = 1
 
 # ──────────────────────────────────────────────────────────────
-# ADVANCED PERSON TRACKING SYSTEM (From Kyle) - OPTIMIZED
+# ADVANCED PERSON TRACKING SYSTEM (From Kyle) - OPTIMIZED ok
 class PersonTracker:
     def __init__(self, max_disappeared=15, feature_threshold=0.3, motion_threshold=150):
         self.next_id = 0

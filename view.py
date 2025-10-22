@@ -6,12 +6,15 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QSlider, QPushButton,
     QListWidget, QListWidgetItem, QScrollArea, QLabel, QFrame, QSizePolicy,
     QProgressDialog, QProgressBar, QApplication, QMainWindow, QMenuBar, QAction,
-    QStatusBar, QToolBar, QSpacerItem, QGraphicsDropShadowEffect, QDialog
+    QStatusBar, QToolBar, QSpacerItem, QGraphicsDropShadowEffect, QDialog,QListWidget, QAbstractItemView
 )
+
 from PyQt5.QtCore import Qt, QPoint, QTimer, QSize, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect
 from PyQt5.QtGui import QImage, QPixmap, QCursor, QPainter, QColor, QFont, QIcon, QPalette, QLinearGradient, QBrush, QPen, QPolygon, QFontMetrics
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread
 
+# at the top of view.py
+from PyQt5.QtWidgets import QAbstractItemView
 
 #NEW
 # --- ProcessingDialog: polished, theme-consistent progress UI ---
@@ -1019,7 +1022,8 @@ class EnhancedEditorPanel(QWidget):
         self._player.setVolume(90)
         self._has_media = False
         self._audio_fallback_path = None
-        
+
+          
         # Connect error handling AFTER creating the player
         try:
             if hasattr(self._player, "errorOccurred"):
@@ -1602,6 +1606,7 @@ class EnhancedEditorPanel(QWidget):
         # --- 4) Detected Gestures ---
         card_g = CardSection("Detected Gestures", container)
         self.gesture_list = QListWidget()
+        self.gesture_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.gesture_list.setMinimumHeight(120)
         self.gesture_list.setMaximumHeight(250)
 

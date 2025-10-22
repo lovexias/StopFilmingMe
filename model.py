@@ -56,7 +56,32 @@ class EditorCore:
         self.detected_people = []  # To store gesture detection results
         self.highlighted_person_ids = set() # Stores person_ids to highlight
 
-    
+
+    def close_video(self):
+        # stop using the current capture and clear caches
+        if getattr(self, "cap", None) is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+        self._frame_cache.clear()
+        self.blurred_cache.clear()
+        self.blurred_frames.clear()
+        self.video_path = None
+        self.total_frames = 0
+
+    def load_video(self, video_path: str) -> dict:
+        if not os.path.exists(video_path):
+            raise IOError(f"Video not found: {video_path}")
+
+        # >>> IMPORTANT: release the previous file handle <<<
+        self.close_video()
+
+        self.video_path = video_path
+        self.cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
+        ...
+
     def get_frame(self, frame_idx: int):
         # Check cache first
         if frame_idx in self._frame_cache:
@@ -160,6 +185,7 @@ class EditorCore:
         if not os.path.exists(video_path):
             raise IOError(f"Video not found: {video_path}")
 
+        self.close_video()
         self.video_path = video_path
         self.cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
 
@@ -340,54 +366,76 @@ class EditorCore:
             "prores":"prores_ks",
         }.get(c, "libx264")
 
-    def _write_intermediate_with_opencv(self, tmp_path, w, h, fps, progress_cb=None):
+    def _write_intermediate_video_fast(self, out_path, out_w, out_h, out_fps, progress_cb=None):
         """
-        Writes an intermediate file (no scaling/fps change yet) using OpenCV.
+        Single fast pass:
+        - Read each original frame
+        - If a disk-cached blurred frame exists, use it
+        else if RAM cache has it, use it
+        else use the original
+        - Write to a single OpenCV video (video-only)
         """
-        in_cap = cv2.VideoCapture(self.video_path, cv2.CAP_FFMPEG)
+        cap = cv2.VideoCapture(self.video_path, cv2.CAP_FFMPEG)
         try:
-            in_cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
         except Exception:
             pass
-        if not in_cap.isOpened():
+        if not cap.isOpened():
             return False
 
-        total = int(in_cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-        fourcc = self._fourcc_for("mp4v")
-        writer = cv2.VideoWriter(tmp_path, fourcc, fps, (w, h))
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+
+        # Use a fast, widely compatible writer; mp4v is fine
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(out_path, fourcc, out_fps, (out_w, out_h))
         if not writer.isOpened():
-            in_cap.release()
+            cap.release()
             return False
+
+        rotation = getattr(self, "rotation_angle", 0)
+        blur_dir = getattr(self, "blur_cache_dir", None)
 
         for i in range(total):
-            ret, frame = in_cap.read()
-            if not ret or frame is None:
+            ok, frame = cap.read()
+            if not ok or frame is None:
                 break
-            frame = self._apply_rotation(frame)
-            if frame.shape[1] != w or frame.shape[0] != h:
-                frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
 
-            # apply blur if scheduled
-            if i in self.blurred_frames and i in self.blurred_cache:
-                writer.write(self.blurred_cache[i])
-            elif i in self.blurred_frames:
-                # Frame is marked for blur but not in cache, blur it now
-                people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-                if people:
-                    frame = blur_faces_of_person(frame, people[0])
-                writer.write(frame)
-            else:
-                writer.write(frame)  # <-- UNCOMMENT THIS LINE!
+            # Apply rotation to the ORIGINAL frame so it matches the UI/export orientation
+            if rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-            if progress_cb and (i % 10 == 0 or i == total - 1):
-                try:
-                    progress_cb(int(50 * (i + 1) / total))
-                except Exception:
-                    pass
+            # Prefer disk-cached blurred frame (source of truth)
+            used = False
+            if blur_dir:
+                jpg_path = os.path.join(blur_dir, f"{i:06d}.jpg")
+                if os.path.exists(jpg_path):
+                    b = cv2.imread(jpg_path)
+                    if b is not None:
+                        frame = b
+                        used = True
+
+            # Fallback to RAM cache if present
+            if not used and i in self.blurred_cache:
+                frame = self.blurred_cache[i]
+
+            # Resize if user requested override
+            if frame.shape[1] != out_w or frame.shape[0] != out_h:
+                frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+
+            writer.write(frame)
+
+            if progress_cb and (i % 25 == 0 or i == total - 1):
+                # ~0–90% reserved for this step; remaining 10% for mux
+                progress_cb(int(90 * (i + 1) / total))
 
         writer.release()
-        in_cap.release()
+        cap.release()
         return True
+
 
     # ────────────────────────────────────────────────────────────────
     # Export (FFmpeg when available; fallback to OpenCV)
@@ -395,102 +443,150 @@ class EditorCore:
     def export_video(self, output_path, progress_cb=None):
         if not self.video_path:
             return False
-        
-        print(f"EXPORT DEBUG: blurred_frames has {len(self.blurred_frames)} frames")
-        print(f"EXPORT DEBUG: blurred_cache has {len(self.blurred_cache)} frames")
 
-        # Source props
+        # use user’s chosen container/codec, but our fast path ignores codec during A (OpenCV),
+        # then mux audio in B without re-encoding video
         src_w = self.src_w or int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
         src_h = self.src_h or int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
         src_fps = self.fps if self.fps else float(self.cap.get(cv2.CAP_PROP_FPS) or 30.0)
 
-        # Apply overrides
         out_w, out_h = self.export_override_res or (src_w, src_h)
         out_fps = self.export_override_fps or src_fps
 
-        # Ensure extension matches container
         root, ext = os.path.splitext(output_path)
         want_ext = "." + (self.export_container or "mp4")
         if ext.lower() != want_ext:
             output_path = root + want_ext
 
-        # Check for ffmpeg
-        ffmpeg = shutil.which("ffmpeg")
+        # 0) If nothing was blurred, fast remux/copy original -> output
+        if not self.blurred_frames:
+            ffmpeg = shutil.which("ffmpeg")
+            if ffmpeg:
+                # Stream copy both audio & video (no re-encode)
+                cmd = [
+                    ffmpeg, "-y", "-i", self.video_path,
+                    "-c", "copy",
+                    output_path
+                ]
+                subprocess.run(cmd, check=False)
+                return os.path.exists(output_path)
+            else:
+                # As a fallback, just copy the file
+                try:
+                    shutil.copy2(self.video_path, output_path)
+                    return True
+                except Exception:
+                    return False
 
-        if ffmpeg:
-            print("Using ffmpeg for export with audio preservation")
-            return self._export_with_ffmpeg_and_audio(output_path, out_w, out_h, out_fps, progress_cb)
-        else:
-            print("Warning: ffmpeg not found. Export will not include audio.")
-            return self._export_opencv_fallback(output_path, out_w, out_h, out_fps, progress_cb)
-        
-        # Add these new methods to the EditorCore class:
+        # 1) Step A: create a fast intermediate video (video only) with OpenCV
+        tmp_dir = tempfile.mkdtemp(prefix="export_fast_")
+        tmp_video = os.path.join(tmp_dir, "video_only.mp4")
+
+        ok = self._write_intermediate_video_fast(
+            tmp_video, out_w, out_h, out_fps, progress_cb=progress_cb
+        )
+        if not ok:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return False
+
+        # 2) Step B: Mux original audio onto the intermediate (no video re-encode)
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            # We’ll just move the video-only file to output (no audio)
+            shutil.move(tmp_video, output_path)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return True
+
+        # Keep audio from original; copy video from intermediate
+        cmd = [
+            ffmpeg, "-y",
+            "-i", tmp_video,    # video-only
+            "-i", self.video_path,  # original for audio
+            "-map", "0:v:0",
+            "-map", "1:a:0?",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            output_path
+        ]
+        subprocess.run(cmd, check=False)
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return os.path.exists(output_path)
+
         
     def _export_with_ffmpeg_and_audio(self, output_path: str, out_w: int, out_h: int, out_fps: float, progress_cb=None):
-        """Export video with ffmpeg, preserving audio and applying blur effects"""
-        import subprocess
-        
+        """Export video with ffmpeg, preserving audio, using existing blurred caches only (no re-detect)."""
+        import subprocess  # os, cv2, tempfile are already imported at module level
+
         vcodec = self._ffmpeg_codec(self.export_codec)
         mbps = max(1, int(self.export_bitrate_mbps))
-        
+
         try:
             # Step 1: Create a temporary directory for frame processing
             with tempfile.TemporaryDirectory() as temp_dir:
                 if progress_cb:
                     progress_cb(5)
-                
+
                 # Step 2: Process frames and save them as individual images
                 frames_dir = os.path.join(temp_dir, "frames")
                 os.makedirs(frames_dir, exist_ok=True)
-                
+
                 in_cap = cv2.VideoCapture(self.video_path, cv2.CAP_FFMPEG)
                 try:
                     in_cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
                 except Exception:
                     pass
-                    
+
                 if not in_cap.isOpened():
                     return False
 
                 total_frames = int(in_cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-                
-                # Process and save frames
+
                 for i in range(total_frames):
                     ret, frame = in_cap.read()
                     if not ret or frame is None:
                         break
-                        
+
+                    # Apply rotation
                     frame = self._apply_rotation(frame)
-                    
-                    # Resize if needed
-                    if i in self.blurred_frames:
-                        # Frame is marked for blur - check cache first
-                        if i in self.blurred_cache:
-                            frame = self.blurred_cache[i]
-                        else:
-                            # Not in cache, apply blur now
-                            from utilities import detect_multiple_people_yolov8, blur_faces_of_person
-                            people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-                            if people:
-                                for person_bbox, _ in people:  # Handle (bbox, mask) tuple format
-                                    frame = blur_faces_of_person(frame, person_bbox)
-                    
-                    # Save frame as PNG (lossless)
+
+                    # --- cache-first, no re-detect ---
+                    if hasattr(self, 'blur_cache_dir') and os.path.exists(self.blur_cache_dir):
+                        jpg_path = os.path.join(self.blur_cache_dir, f"{i:06d}.jpg")
+                    else:
+                        jpg_path = None
+
+                    if jpg_path and os.path.exists(jpg_path):
+                        # 1) Prefer disk-cached blurred frame
+                        frame_to_write = cv2.imread(jpg_path)
+                    elif i in self.blurred_cache:
+                        # 2) Fallback to RAM cache
+                        frame_to_write = self.blurred_cache[i]
+                    else:
+                        # 3) No blurred frame available -> write original frame as-is
+                        frame_to_write = frame
+
+                    # Resize if needed (honor export overrides)
+                    if (frame_to_write.shape[1] != out_w) or (frame_to_write.shape[0] != out_h):
+                        frame_to_write = cv2.resize(frame_to_write, (out_w, out_h), interpolation=cv2.INTER_AREA)
+
+                    # Save PNG (lossless-ish) for ffmpeg muxing
                     frame_path = os.path.join(frames_dir, f"frame_%08d.png" % i)
-                    cv2.imwrite(frame_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])  # Fast compression
-                    
+                    cv2.imwrite(frame_path, frame_to_write, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+
                     if progress_cb and (i % 10 == 0 or i == total_frames - 1):
-                        progress_cb(int(5 + (i + 1) * 80 / total_frames))  # 5-85% for frame processing
+                        # 5–85% for frame processing
+                        progress_cb(int(5 + (i + 1) * 80 / max(1, total_frames)))
 
                 in_cap.release()
-                
+
                 if progress_cb:
                     progress_cb(85)
-                
+
                 # Step 3: Use ffmpeg to combine frames with original audio
                 frame_pattern = os.path.join(frames_dir, "frame_%08d.png")
-                
-                # Build ffmpeg command to combine frames with audio from original video
+
                 cmd = [
                     "ffmpeg", "-y",
                     "-framerate", str(out_fps),
@@ -500,38 +596,37 @@ class EditorCore:
                     "-map", "1:a",                 # Use audio from second input (original video)
                     "-c:v", vcodec,
                     "-b:v", f"{mbps}M",
-                    "-c:a", "aac",                 # Re-encode audio as AAC (compatible)
-                    "-b:a", "128k",                # Audio bitrate
-                    "-shortest",                   # End when shortest stream ends
-                    "-pix_fmt", "yuv420p",         # Ensure compatibility
-                    "-r", str(out_fps),            # Output framerate
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-shortest",
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(out_fps),
                     output_path
                 ]
-                
+
                 if progress_cb:
                     progress_cb(90)
-                
-                print(f"Running ffmpeg: {' '.join(cmd[:8])}...")  # Don't log full paths
-                
-                # Run ffmpeg with error capture
+
+                print(f"Running ffmpeg: {' '.join(cmd[:8])}...")
+
                 result = subprocess.run(
-                    cmd, 
-                    capture_output=True, 
+                    cmd,
+                    capture_output=True,
                     text=True,
-                    timeout=300  # 5 minute timeout
+                    timeout=300  # 5 minutes
                 )
-                
+
                 if result.returncode != 0:
                     print(f"FFmpeg error (return code {result.returncode}):")
-                    print(f"stderr: {result.stderr[-1000:]}")  # Last 1000 chars of error
+                    print(f"stderr: {result.stderr[-1000:]}")
                     return False
-                
+
                 if progress_cb:
                     progress_cb(100)
-                    
+
                 print(f"Export completed successfully: {output_path}")
                 return True
-                
+
         except subprocess.TimeoutExpired:
             print("FFmpeg export timed out")
             return False
@@ -541,21 +636,14 @@ class EditorCore:
             traceback.print_exc()
             return False
 
-    def _export_opencv_fallback(self, output_path: str, out_w: int, out_h: int, out_fps: float, progress_cb=None):
-        """Fallback export using OpenCV (no audio)"""
 
-        # At the beginning of export_video, load frames from disk cache if available
-        if hasattr(self, 'blur_cache_dir') and os.path.exists(self.blur_cache_dir):
-            import glob
-            cached_files = glob.glob(os.path.join(self.blur_cache_dir, "*.jpg"))
-            print(f"Found {len(cached_files)} cached blur frames")
-            
-            # Load cached frames back into memory for export
-            for cache_path in cached_files:
-                frame_num = int(os.path.basename(cache_path).split('.')[0])
-                if frame_num not in self.blurred_cache:
-                    self.blurred_cache[frame_num] = cv2.imread(cache_path)
-                    self.blurred_frames.add(frame_num)
+    def _export_opencv_fallback(self, output_path: str, out_w: int, out_h: int, out_fps: float, progress_cb=None):
+        """Fallback export using OpenCV (no audio).
+        Never re-detect on export. For each frame:
+        1) Prefer disk-cached blurred JPG (if present)
+        2) Else use RAM cache (self.blurred_cache[i])
+        3) Else write the original frame
+        """
 
         in_cap = cv2.VideoCapture(self.video_path, cv2.CAP_FFMPEG)
         try:
@@ -572,27 +660,43 @@ class EditorCore:
             return False
 
         total = int(in_cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        rotation = getattr(self, "rotation_angle", 0)
+        blur_dir = getattr(self, "blur_cache_dir", None)
 
         for i in range(total):
-            ret, frame = in_cap.read()
-            if not ret or frame is None:
+            ret, original_frame = in_cap.read()
+            if not ret or original_frame is None:
                 break
 
-            frame = self._apply_rotation(frame)
-            if frame.shape[1] != out_w or frame.shape[0] != out_h:
-                frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+            # Apply rotation to the original so it matches preview/export orientation
+            if rotation == 90:
+                original_frame = cv2.rotate(original_frame, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                original_frame = cv2.rotate(original_frame, cv2.ROTATE_180)
+            elif rotation == 270:
+                original_frame = cv2.rotate(original_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-            # model.py — _write_intermediate_with_opencv
-            if i in self.blurred_frames and i in self.blurred_cache:
-                writer.write(self.blurred_cache[i])
-            elif i in self.blurred_frames:
-                people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-                if people:
-                    frame = blur_faces_of_person(frame, people[0])
-                writer.write(frame)
-            else:
-                writer.write(frame)
+            # ---------- Per-frame decision ----------
+            out_frame = None
 
+            # 1) Prefer disk-cached blurred JPG
+            jpg_path = os.path.join(blur_dir, f"{i:06d}.jpg") if blur_dir else None
+            if jpg_path and os.path.exists(jpg_path):
+                out_frame = cv2.imread(jpg_path)
+
+            # 2) Fallback to RAM cache
+            if out_frame is None and i in self.blurred_cache:
+                out_frame = self.blurred_cache[i]
+
+            # 3) Else: no blurred frame available — write original (NO re-detect)
+            if out_frame is None:
+                out_frame = original_frame
+
+            # Resize if needed to meet output dimensions
+            if out_frame.shape[1] != out_w or out_frame.shape[0] != out_h:
+                out_frame = cv2.resize(out_frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+
+            writer.write(out_frame)
 
             if progress_cb and (i % 10 == 0 or i == total - 1):
                 try:
@@ -603,6 +707,7 @@ class EditorCore:
         in_cap.release()
         writer.release()
         return True
+
 
     # ────────────────────────────────────────────────────────────────
     # Blurring pass (track person across frames)
@@ -637,7 +742,9 @@ class EditorCore:
                         break
 
             if last_matched_bbox is not None:
-                frame_b = blur_faces_of_person(frame, last_matched_bbox)
+                
+                base = self.blurred_cache.get(frame_idx, frame)
+                frame_b = blur_faces_of_person(base, last_matched_bbox)
                 self.blurred_cache[frame_idx] = frame_b
                 self.blurred_frames.add(frame_idx)
                 blurred_frames.append(frame_idx)
