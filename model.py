@@ -71,16 +71,7 @@ class EditorCore:
         self.video_path = None
         self.total_frames = 0
 
-    def load_video(self, video_path: str) -> dict:
-        if not os.path.exists(video_path):
-            raise IOError(f"Video not found: {video_path}")
-
-        # >>> IMPORTANT: release the previous file handle <<<
-        self.close_video()
-
-        self.video_path = video_path
-        self.cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
-        ...
+   
 
     def get_frame(self, frame_idx: int):
         # Check cache first
@@ -328,21 +319,6 @@ class EditorCore:
         
         return sorted(all_detections, key=lambda x: x[2])
 
-    # ────────────────────────────────────────────────────────────────
-    # Frame access
-    # ────────────────────────────────────────────────────────────────
-    def get_frame(self, frame_idx: int):
-        if self.cap is None:
-            return None
-
-        if frame_idx in self.blurred_cache:
-            return self.blurred_cache[frame_idx]
-
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = self.cap.read()
-        if not ret or frame is None:
-            return None
-        return self._apply_rotation(frame)
 
     # ────────────────────────────────────────────────────────────────
     # Export helpers
