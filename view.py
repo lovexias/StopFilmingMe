@@ -1,35 +1,31 @@
-# ──── Enhanced Video Editor Interface ─────────────────────────────────────────────────────────────────────
+# ──── Enhanced Video Editor Interface ─────────────────────────────────────────
+import os
+import sys
 import time
+import shutil
+import subprocess
+import webbrowser
+
+
 import cv2
 import numpy as np
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QSlider, QPushButton,
-    QListWidget, QListWidgetItem, QScrollArea, QLabel, QFrame, QSizePolicy,
-    QProgressDialog, QProgressBar, QApplication, QMainWindow, QMenuBar, QAction,
-    QStatusBar, QToolBar, QSpacerItem, QGraphicsDropShadowEffect, QDialog,QListWidget, QAbstractItemView
+
+from PyQt5.QtCore import (
+    Qt, QUrl, QTimer, QElapsedTimer, QPoint, QSize, QRect,
+    QObject, QThread, pyqtSignal, pyqtSlot, QPropertyAnimation, QEasingCurve, QProcess
 )
-
-from PyQt5.QtCore import Qt, QPoint, QTimer, QSize, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect
-from PyQt5.QtGui import QImage, QPixmap, QCursor, QPainter, QColor, QFont, QIcon, QPalette, QLinearGradient, QBrush, QPen, QPolygon, QFontMetrics
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread
-
-# at the top of view.py
-from PyQt5.QtWidgets import QAbstractItemView
-
-#NEW
-# --- ProcessingDialog: polished, theme-consistent progress UI ---
-from PyQt5.QtCore import Qt, QTimer, QElapsedTimer
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QHBoxLayout, QPushButton
-from PyQt5.QtWidgets import QRadioButton, QButtonGroup
-from PyQt5.QtWidgets import QSpinBox
-# --- In-app Export dialog -----------------------------------------------------
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-                             QComboBox, QPushButton, QFileDialog, QSlider, QSpinBox)
-from PyQt5.QtCore import Qt
-import os
-from PyQt5.QtCore import QUrl
+from PyQt5.QtGui import (
+    QImage, QPixmap, QCursor, QPainter, QColor, QFont, QIcon, QPalette,
+    QLinearGradient, QBrush, QPen, QPolygon, QFontMetrics, QDesktopServices
+)
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QMainWindow, QDialog, QLabel, QPushButton, QSlider,
+    QListWidget, QListWidgetItem, QScrollArea, QFrame, QSizePolicy, QProgressBar,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QSplitter, QMenuBar, QAction, QStatusBar,
+    QToolBar, QSpacerItem, QGraphicsDropShadowEffect, QAbstractItemView, QTextBrowser,
+    QLineEdit, QComboBox, QFileDialog, QRadioButton, QButtonGroup, QSpinBox
+)
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-
 
 # Premiere Pro Style Colors - Professional Dark Theme
 APP_BG = "#1e1e1e"         # Main background (darker)
@@ -46,6 +42,58 @@ BORDER_LIGHT = "#505050"   # Lighter borders
 SUCCESS = "#00d084"        # Success/positive
 WARNING = "#ffb900"        # Warning
 DANGER = "#d13438"         # Error/danger
+
+
+
+def _app_root_dir() -> str:
+    if getattr(sys, "_MEIPASS", None):      # PyInstaller bundle
+        return sys._MEIPASS
+    # dev run: folder of the launcher (main.py)
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+def _find_docs_html() -> str:
+    base = _app_root_dir()
+    candidates = [
+        os.path.join(base, "docs", "documentation.html"),
+        os.path.join(base, "docs", "index.html"),
+        os.path.join(base, "documentation.html"),
+        os.path.join(base, "docs.html"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return ""
+
+
+def open_in_edge(target: str) -> None:
+    # Convert local path to file:// URL if it exists
+    url = QUrl.fromLocalFile(target).toString() if os.path.exists(target) else target
+
+    # 1) Prefer launching Edge directly with the URL/file (most reliable for local files)
+    for exe in (
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    ):
+        if os.path.exists(exe):
+            QProcess.startDetached(exe, [url])
+            return
+
+    # 2) Try the edge protocol (works well for http/https)
+    if QDesktopServices.openUrl(QUrl(f"microsoft-edge:{url}")):
+        return
+
+    # 3) Last resort: system default
+    QDesktopServices.openUrl(QUrl(url))
+
+
+def open_docs_html_or_web(fallback_url: str = "https://example.com/stopfilming/docs") -> None:
+    local = _find_docs_html()
+    open_in_edge(local if local else fallback_url)
+
+
+print("APP ROOT:", _app_root_dir())
+print("DOCS PATH:", _find_docs_html())
+
 
 
 class ExportDialog(QDialog):
@@ -231,6 +279,158 @@ class ExportDialog(QDialog):
             "resolution": self.res_box.currentText(),
             "fps": self.fps_box.currentText(),
         }
+
+
+# --- Quick Help dialog --------------------------------------------------------
+class HelpDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Quick Help")
+        self.setModal(True)
+        self.setMinimumWidth(560)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        self.setStyleSheet(f"""
+            QDialog {{
+                background: {PANEL_BG};
+                color: {TEXT};
+                border: 1px solid {BORDER};
+                border-radius: 8px;
+                font-family: 'Segoe UI', Tahoma, sans-serif;
+            }}
+            QLabel#title {{
+                color: {ACCENT_LIGHT};
+                font-size: 18px;
+                font-weight: 700;
+                padding-bottom: 4px;
+            }}
+            QLabel#section {{
+                color: {TEXT};
+                font-size: 13px;
+                font-weight: 600;
+                margin-top: 10px;
+            }}
+            QLabel#bullet {{
+                color: {TEXT};
+                font-size: 12px;
+            }}
+            QFrame#line {{
+                background: {BORDER};
+                height: 1px;
+            }}
+            QPushButton {{
+                background: {ACCENT};
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 14px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {ACCENT_HOVER}; }}
+            QPushButton#secondary {{
+                background: {PANEL_BG};
+                color: {TEXT};
+                border: 1px solid {BORDER};
+            }}
+            QPushButton#secondary:hover {{
+                background: {BORDER};
+            }}
+        """)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(20, 18, 20, 18)
+        v.setSpacing(10)
+
+        title = QLabel("StopFilming — Quick Help")
+        title.setObjectName("title")
+        v.addWidget(title)
+
+        v.addWidget(self._line())
+
+        # Sections
+        v.addWidget(self._section("1) Import"))
+        v.addWidget(self._bullets([
+            "Click **File → Open Video…** or use the big **Import Video** button on the canvas.",
+            "Supported: MP4, MOV, AVI (others may work depending on codecs)."
+        ]))
+
+        v.addWidget(self._section("2) Navigate & Play"))
+        v.addWidget(self._bullets([
+            "Use the **timeline slider** under the video to scrub.",
+            "Press **Play/Pause** or hit **Space** to toggle playback.",
+            "The **time ruler** shows running time; the blue line is the playhead."
+        ]))
+
+        v.addWidget(self._section("3) Detect Gestures"))
+        v.addWidget(self._bullets([
+            "Choose **Tools → Detect Gestures** (or the **Detect** button).",
+            "We scan frames using an optimized single-pass detector for people & poses.",
+            "Results appear in the **Markers** panel on the right."
+        ]))
+
+        v.addWidget(self._section("4) Review Results"))
+        v.addWidget(self._bullets([
+            "Click a result in the list to jump to that frame.",
+            "We’ll highlight the person’s bounding box on the video."
+        ]))
+
+        v.addWidget(self._section("5) Blur Faces"))
+        v.addWidget(self._bullets([
+            "Select one or more people in the list and click **Blur**.",
+            "Blurring persists across playback; you can add more people later.",
+            "Use **Tools → Clear All Blurs** to reset."
+        ]))
+
+        v.addWidget(self._section("6) Export"))
+        v.addWidget(self._bullets([
+            "Choose **File → Export…** to create a new blurred video.",
+            "Pick format/codec/bitrate; defaults aim for quality + compatibility."
+        ]))
+
+        v.addWidget(self._section("Tips"))
+        v.addWidget(self._bullets([
+            "For faster detection, avoid ultra-high-res sources when possible.",
+            "If memory climbs, the app auto-trims frame cache to stay smooth.",
+            "Use **View** menu to toggle thumbnails or the markers panel."
+        ]))
+
+        v.addStretch(1)
+        v.addWidget(self._line())
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.btn_docs = QPushButton("Open Docs")
+        self.btn_docs.clicked.connect(self._open_docs)
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setObjectName("secondary")
+        self.btn_close.clicked.connect(self.accept)
+        btn_row.addWidget(self.btn_docs)
+        btn_row.addWidget(self.btn_close)
+        v.addLayout(btn_row)
+
+    def _line(self):
+        line = QFrame(); line.setObjectName("line")
+        line.setFixedHeight(1)
+        return line
+
+    def _section(self, text):
+        lbl = QLabel(text)
+        lbl.setObjectName("section")
+        return lbl
+
+    def _bullets(self, items):
+        wrap = QVBoxLayout(); wrap.setContentsMargins(0,0,0,0); wrap.setSpacing(4)
+        for t in items:
+            lbl = QLabel(f"• {t}")
+            lbl.setWordWrap(True)
+            lbl.setObjectName("bullet")
+            wrap.addWidget(lbl)
+        c = QWidget(); c.setLayout(wrap)
+        return c
+
+    def _open_docs(self):
+        open_docs_html_or_web("https://example.com/stopfilming/docs")
 
 
 class ProcessingDialog(QDialog):
@@ -1906,6 +2106,10 @@ class EnhancedEditorPanel(QWidget):
         pass
 
     # ---- Progress Dialogs ----
+
+    
+
+
     def start_detect_progress(self):
         self._dlg_detect = ProcessingDialog(self, "Processing", "Detecting gestures…", None, False)
         self._dlg_detect.show()
@@ -2438,75 +2642,328 @@ class DetectWorker(QObject):
 class KeyboardShortcutsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Keyboard Shortcuts")
+        self.setWindowTitle("Keyboard Shortcuts – StopFilming")
         self.setModal(True)
-        self.setFixedSize(380, 280)
-        self.setWindowFlags(
-            Qt.Dialog
-            | Qt.WindowCloseButtonHint
-            | Qt.MSWindowsFixedSizeDialogHint
-        )
+        self.setMinimumSize(520, 380)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        # Fallbacks in case these constants aren't imported above
+        palette = globals()
+        APP_BG       = palette.get("APP_BG", "#1E1E1E")
+        PANEL_BG     = palette.get("PANEL_BG", "#252A32")
+        TEXT         = palette.get("TEXT", "#E2E8F0")
+        SUBTLE_TEXT  = palette.get("SUBTLE_TEXT", "#A0AEC0")
+        BORDER       = palette.get("BORDER", "#3A4453")
+        ACCENT       = palette.get("ACCENT", "#3B82F6")
+        ACCENT_HOVER = palette.get("ACCENT_HOVER", "#2563EB")
 
         self.setStyleSheet(f"""
             QDialog {{
-                background: {PANEL_BG}; 
-                border: 1px solid {BORDER};
-                border-radius: 8px;
-                font-family: 'Segoe UI', Tahoma, sans-serif;
-            }}
-            QLabel#header {{
-                font-size: 16px; 
-                font-weight: 600; 
-                color: {ACCENT_LIGHT};
-            }}
-            QLabel {{
-                font-size: 13px; 
+                background: {PANEL_BG};
                 color: {TEXT};
+                border: 1px solid {BORDER};
+                border-radius: 10px;
             }}
-            QPushButton {{
+            QLabel#title {{
+                color: {ACCENT};
+                font-size: 18px;
+                font-weight: 700;
+            }}
+            QLabel#subtitle {{
+                color: {SUBTLE_TEXT};
+                font-size: 12px;
+                padding-bottom: 4px;
+            }}
+            QLabel.shortcut {{
+                color: {TEXT};
+                font-family: Consolas, "SF Mono", Menlo, monospace;
+                font-size: 13px;
+                padding: 2px 8px;
+                background: rgba(255,255,255,0.04);
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+            }}
+            QLabel.action {{
+                color: {TEXT};
+                font-size: 13px;
+                padding-left: 6px;
+            }}
+            QFrame#line {{
+                background: {BORDER};
+                height: 1px;
+            }}
+            QPushButton.primary {{
                 background: {ACCENT};
                 color: white;
                 border: none;
+                border-radius: 6px;
                 padding: 8px 16px;
-                border-radius: 4px;
-                font-size: 13px;
                 font-weight: 600;
-                min-width: 80px;
+                min-width: 96px;
             }}
-            QPushButton:hover {{
-                background: {ACCENT_HOVER};
-            }}
+            QPushButton.primary:hover {{ background: {ACCENT_HOVER}; }}
         """)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(16)
+        # ---- Layout ---------------------------------------------------------
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
 
-        header = QLabel("Keyboard Shortcuts", self)
-        header.setObjectName("header")
-        header.setAlignment(Qt.AlignCenter)
-        layout.addWidget(header)
+        title = QLabel("Keyboard Shortcuts")
+        title.setObjectName("title")
+        root.addWidget(title)
 
-        shortcuts = [
+        subtitle = QLabel("Handy keys to navigate, detect, blur and export quickly.")
+        subtitle.setObjectName("subtitle")
+        root.addWidget(subtitle)
+
+        line = QFrame(); line.setObjectName("line"); line.setFixedHeight(1)
+        root.addWidget(line)
+
+        grid = QGridLayout()
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(10)
+        root.addLayout(grid)
+
+        def add_row(r, key, action):
+            k = QLabel(key);    k.setObjectName("shortcut"); k.setProperty("class", "shortcut")
+            a = QLabel(action); a.setObjectName("action");   a.setProperty("class", "action")
+            # ensure pure text (no rich text/links/underline)
+            k.setTextFormat(Qt.PlainText); a.setTextFormat(Qt.PlainText)
+            grid.addWidget(k, r, 0, alignment=Qt.AlignLeft)
+            grid.addWidget(a, r, 1, alignment=Qt.AlignLeft)
+
+        rows = [
             ("Ctrl+O", "Open Video"),
             ("Ctrl+S", "Save Project"),
             ("Ctrl+E", "Export Video"),
-            ("Space", "Play/Pause"),
+            ("Space",  "Play / Pause"),
             ("Ctrl+D", "Detect Gestures"),
             ("Ctrl+B", "Blur Person"),
-            ("F11", "Toggle Fullscreen"),
+            ("F11",    "Toggle Fullscreen"),
             ("Ctrl+Q", "Quit"),
         ]
-        
-        for key, desc in shortcuts:
-            lbl = QLabel(f"<span style='font-family: monospace; background: {DARKER_BG}; padding: 2px 6px; border-radius: 3px;'>{key}</span>  —  {desc}", self)
-            layout.addWidget(lbl)
+        for i, (k, a) in enumerate(rows):
+            add_row(i, k, a)
 
-        layout.addStretch()
+        root.addStretch(1)
 
-        close_btn = QPushButton("Close", self)
+        line2 = QFrame(); line2.setObjectName("line"); line2.setFixedHeight(1)
+        root.addWidget(line2)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        close_btn = QPushButton("Close"); close_btn.setObjectName("close")
+        close_btn.setProperty("class", "primary")
         close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn, alignment=Qt.AlignCenter)
+        btns.addWidget(close_btn)
+        root.addLayout(btns)
+
+# --- About dialog -------------------------------------------------------------
+class AboutDialog(QDialog):
+    def __init__(self, parent=None, version="v1.0", year="2025"):
+        super().__init__(parent)
+        self.setWindowTitle("About StopFilming")
+        self.setModal(True)
+        self.setMinimumWidth(480)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        
+        
+
+        # Fallbacks if tokens aren't in scope
+        g = globals()
+        APP_BG       = g.get("APP_BG", "#1E1E1E")
+        PANEL_BG     = g.get("PANEL_BG", "#252A32")
+        TEXT         = g.get("TEXT", "#E2E8F0")
+        SUBTLE_TEXT  = g.get("SUBTLE_TEXT", "#A0AEC0")
+        BORDER       = g.get("BORDER", "#3A4453")
+        ACCENT       = g.get("ACCENT", "#3B82F6")
+        ACCENT_HOVER = g.get("ACCENT_HOVER", "#2563EB")
+
+        self.setStyleSheet(f"""
+            QDialog {{
+                background: {PANEL_BG};
+                color: {TEXT};
+                border: 1px solid {BORDER};
+                border-radius: 10px;
+            }}
+            QLabel#title {{
+                color: {ACCENT};
+                font-size: 20px;
+                font-weight: 700;
+            }}
+            QLabel#subtitle {{
+                color: {SUBTLE_TEXT};
+                font-size: 12px;
+            }}
+            QLabel#meta {{
+                color: {TEXT};
+                font-size: 13px;
+            }}
+            QLabel#link {{
+                color: {ACCENT};
+                font-size: 13px;
+            }}
+            QFrame#line {{ background: {BORDER}; height: 1px; }}
+            QPushButton.primary {{
+                background: {ACCENT};
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+                min-width: 96px;
+            }}
+            QPushButton.primary:hover {{ background: {ACCENT_HOVER}; }}
+            QPushButton.ghost {{
+                background: transparent;
+                color: {TEXT};
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+            }}
+            QPushButton.ghost:hover {{ background: rgba(255,255,255,0.04); }}
+        """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
+
+        # Header row with icon + title
+        header = QHBoxLayout()
+        icon_lbl = QLabel()
+        # Use the app/window icon if available
+        pix = (parent.windowIcon().pixmap(48, 48) if parent and parent.windowIcon()
+               else QIcon().pixmap(48, 48))
+        icon_lbl.setPixmap(pix)
+        icon_lbl.setFixedSize(48, 48)
+
+        title_box = QVBoxLayout()
+        title = QLabel("StopFilming")
+        title.setObjectName("title")
+        subtitle = QLabel("Privacy Protection Video Editor")
+        subtitle.setObjectName("subtitle")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+
+        header.addWidget(icon_lbl, 0, Qt.AlignTop)
+        header.addLayout(title_box)
+        header.addStretch(1)
+        root.addLayout(header)
+
+        line = QFrame(); line.setObjectName("line"); line.setFixedHeight(1)
+        root.addWidget(line)
+
+        meta = QLabel(f"Version {version}  •  © {year}")
+        meta.setObjectName("meta")
+        root.addWidget(meta)
+
+        # Links / info
+        # "Documentation" label link
+        link = QLabel('<a href="#">Documentation</a>')
+        link.setObjectName("link")
+        link.setOpenExternalLinks(False)
+        link.linkActivated.connect(lambda _: open_docs_html_or_web("https://example.com/stopfilming/docs"))
+
+        
+        # ... keep metadata and link label ...
+        root.addStretch(1)
+        line2 = QFrame(); line2.setObjectName("line"); line2.setFixedHeight(1)
+        root.addWidget(line2)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        more_btn = QPushButton("Website"); more_btn.setProperty("class", "ghost")
+        more_btn.clicked.connect(lambda: open_docs_html_or_web())
+
+        ok_btn = QPushButton("OK"); ok_btn.setProperty("class", "primary")
+        ok_btn.clicked.connect(self.accept)
+
+        btns.addWidget(more_btn)
+        btns.addWidget(ok_btn)
+        root.addLayout(btns)
+
+        
+    def _open_readme(self):
+        try:
+            dlg = ReadmeDialog(self)
+            dlg.exec_()
+        except Exception as e:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Documentation", f"Could not open README:\n{e}")
+
+
+    def _open_url(self, url):
+        open_docs_html_or_web("https://example.com/stopfilming/docs")
+
+
+class ReadmeDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("README – StopFilming")
+        self.setModal(True)
+        self.resize(760, 560)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        g = globals()
+        PANEL_BG     = g.get("PANEL_BG", "#252A32")
+        TEXT         = g.get("TEXT", "#E2E8F0")
+        SUBTLE_TEXT  = g.get("SUBTLE_TEXT", "#A0AEC0")
+        BORDER       = g.get("BORDER", "#3A4453")
+        ACCENT       = g.get("ACCENT", "#3B82F6")
+        ACCENT_HOVER = g.get("ACCENT_HOVER", "#2563EB")
+
+        self.setStyleSheet(f"""
+            QDialog {{ background:{PANEL_BG}; color:{TEXT}; border:1px solid {BORDER}; border-radius:10px; }}
+            QLabel#title {{ color:{ACCENT}; font-size:18px; font-weight:700; }}
+            QFrame#line {{ background:{BORDER}; height:1px; }}
+            QTextBrowser {{ background:transparent; color:{TEXT}; border:none; font-size:14px; }}
+            QPushButton.primary {{ background:{ACCENT}; color:white; border:none; border-radius:6px; padding:8px 16px; font-weight:600; }}
+            QPushButton.primary:hover {{ background:{ACCENT_HOVER}; }}
+        """)
+
+        v = QVBoxLayout(self); v.setContentsMargins(16,14,16,14); v.setSpacing(10)
+        title = QLabel("README"); title.setObjectName("title")
+        v.addWidget(title)
+        line = QFrame(); line.setObjectName("line"); line.setFixedHeight(1)
+        v.addWidget(line)
+
+        self.viewer = QTextBrowser()
+        self.viewer.setOpenExternalLinks(True)
+        v.addWidget(self.viewer, 1)
+
+        btns = QHBoxLayout(); btns.addStretch(1)
+        close = QPushButton("Close"); close.setProperty("class","primary"); close.clicked.connect(self.accept)
+        btns.addWidget(close); v.addLayout(btns)
+
+        self._load_readme()
+
+    def _readme_path(self):
+        import os, sys
+        base = os.path.dirname(os.path.abspath(sys.argv[0]))
+        for name in ("README.md", "Readme.md", "readme.md"):
+            p = os.path.join(base, name)
+            if os.path.exists(p): return p
+        return None
+
+    def _load_readme(self):
+        p = self._readme_path()
+        if not p:
+            self.viewer.setPlainText("README.md not found next to the app.")
+            return
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+
+        # Qt ≥ 5.14 supports Markdown; earlier falls back to plain text
+        if hasattr(self.viewer, "setMarkdown"):
+            self.viewer.setMarkdown(text)
+        else:
+            self.viewer.setPlainText(text)
+
+
 
 
 # ============================================================================

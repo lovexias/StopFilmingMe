@@ -15,6 +15,8 @@ import webbrowser
 import time
 import cv2
 from ultralytics import YOLO
+from PyQt5.QtCore import QUrl
+import webbrowser
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAction, QFileDialog, QMessageBox, QDialog,
@@ -375,6 +377,8 @@ class MainWindow(QMainWindow):
         about_action = QAction("About StopFilming", self)
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
+
+        
 
         shortcuts_action = QAction("Keyboard Shortcuts", self)
         shortcuts_action.triggered.connect(self._show_shortcuts_reference)
@@ -1241,7 +1245,32 @@ class MainWindow(QMainWindow):
 
     # ---------- misc ----------
     def _open_documentation(self):
-        webbrowser.open("https://example.com/stopfilming/docs")
+        webbrowser.open(self._docs_local_url())
+
+    
+    def _docs_local_url(self):
+        
+        # Prefer local docs next to the app (works with PyInstaller too)
+        base = os.path.dirname(os.path.abspath(sys.argv[0]))
+        candidates = [
+            os.path.join(base, "docs", "index.html"),
+            os.path.join(base, "docs.html"),
+            os.path.join(base, "StopFilmingDocs.html"),
+            os.path.join(base, "help", "index.html"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                return QUrl.fromLocalFile(p).toString()
+
+        # Optional override via env var if you host it later:
+        import os as _os
+        url = _os.environ.get("STOPFILMING_DOCS_URL")
+        if url:
+            return url
+
+        # Final fallback (anything you like)
+        return "https://example.com/stopfilming/docs"
+
 
     def _check_for_updates(self):
         QMessageBox.information(self, "Check for Updates", "No updates available.")
@@ -1252,9 +1281,24 @@ class MainWindow(QMainWindow):
     def _show_shortcuts_reference(self):
         dlg = KeyboardShortcutsDialog(self)
         dlg.exec_()
+    
+    def _show_quick_help(self):
+        try:
+            from view import HelpDialog
+            dlg = HelpDialog(self)
+            dlg.exec_()
+        except Exception as e:
+            QMessageBox.information(self, "Help", f"Unable to open help: {e}")
 
     def _show_about_dialog(self):
-        QMessageBox.information(self, "About StopFilming", "StopFilming v1.0\n© 2025")
+        try:
+            from view import AboutDialog
+            dlg = AboutDialog(self, version="v1.0", year="2025")
+            dlg.exec_()
+        except Exception as e:
+            # Fallback to a plain message box if something goes wrong
+            QMessageBox.information(self, "About StopFilming", f"StopFilming v1.0\n© 2025\n\n{e}")
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1264,6 +1308,27 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+    
+
+    def _show_documentation(self):
+        """
+        Finds and opens documentation.html in the user's default browser.
+        """
+        try:
+            # Find the path relative to the main.py script
+            # (Your main.py already imports os and sys)
+            base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+            doc_path = os.path.join(base_dir, "documentation.html")
+
+            if os.path.exists(doc_path):
+                # Open the file in the default web browser
+                # (Your main.py already imports webbrowser)
+                webbrowser.open(f"file:///{os.path.abspath(doc_path)}")
+            else:
+                QMessageBox.warning(self, "Documentation Not Found",
+                                    f"Could not find documentation.html in the application directory:\n{base_dir}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An error occurred while opening documentation:\n{e}")
 
     def _show_video_settings_dialog(self):
         QMessageBox.information(self, "Video Settings", "Video-settings are not implemented yet.")
