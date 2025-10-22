@@ -52,6 +52,10 @@ class EditorCore:
         self._frame_cache = {}  # Simple frame cache
         self._max_cached_frames = 50
 
+        # NEW FOR HIGHLIGHT PERSON
+        self.detected_people = []  # To store gesture detection results
+        self.highlighted_person_ids = set() # Stores person_ids to highlight
+
     
     def get_frame(self, frame_idx: int):
         # Check cache first
@@ -367,13 +371,17 @@ class EditorCore:
             if i in self.blurred_frames and i in self.blurred_cache:
                 writer.write(self.blurred_cache[i])
             elif i in self.blurred_frames:
-                writer.write(blur_faces_of_person(frame))
-            else:
+                # Frame is marked for blur but not in cache, blur it now
+                people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+                if people:
+                    frame = blur_faces_of_person(frame, people[0])
                 writer.write(frame)
+            else:
+                writer.write(frame)  # <-- UNCOMMENT THIS LINE!
 
             if progress_cb and (i % 10 == 0 or i == total - 1):
                 try:
-                    progress_cb(int(50 * (i + 1) / total))  # 0..50% for the intermediate stage
+                    progress_cb(int(50 * (i + 1) / total))
                 except Exception:
                     pass
 
@@ -387,6 +395,9 @@ class EditorCore:
     def export_video(self, output_path, progress_cb=None):
         if not self.video_path:
             return False
+        
+        print(f"EXPORT DEBUG: blurred_frames has {len(self.blurred_frames)} frames")
+        print(f"EXPORT DEBUG: blurred_cache has {len(self.blurred_cache)} frames")
 
         # Source props
         src_w = self.src_w or int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
@@ -452,18 +463,17 @@ class EditorCore:
                     frame = self._apply_rotation(frame)
                     
                     # Resize if needed
-                    if frame.shape[1] != out_w or frame.shape[0] != out_h:
-                        frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
-
-                    # Apply blur if scheduled
-                    if i in self.blurred_frames and i in self.blurred_cache:
-                        frame = self.blurred_cache[i]
-                    elif i in self.blurred_frames:
-                        # Apply blur to this frame
-                        from utilities import detect_multiple_people_yolov8, blur_faces_of_person
-                        people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-                        if people:
-                            frame = blur_faces_of_person(frame, people[0])  # Blur first detected person
+                    if i in self.blurred_frames:
+                        # Frame is marked for blur - check cache first
+                        if i in self.blurred_cache:
+                            frame = self.blurred_cache[i]
+                        else:
+                            # Not in cache, apply blur now
+                            from utilities import detect_multiple_people_yolov8, blur_faces_of_person
+                            people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+                            if people:
+                                for person_bbox, _ in people:  # Handle (bbox, mask) tuple format
+                                    frame = blur_faces_of_person(frame, person_bbox)
                     
                     # Save frame as PNG (lossless)
                     frame_path = os.path.join(frames_dir, f"frame_%08d.png" % i)
@@ -533,6 +543,20 @@ class EditorCore:
 
     def _export_opencv_fallback(self, output_path: str, out_w: int, out_h: int, out_fps: float, progress_cb=None):
         """Fallback export using OpenCV (no audio)"""
+
+        # At the beginning of export_video, load frames from disk cache if available
+        if hasattr(self, 'blur_cache_dir') and os.path.exists(self.blur_cache_dir):
+            import glob
+            cached_files = glob.glob(os.path.join(self.blur_cache_dir, "*.jpg"))
+            print(f"Found {len(cached_files)} cached blur frames")
+            
+            # Load cached frames back into memory for export
+            for cache_path in cached_files:
+                frame_num = int(os.path.basename(cache_path).split('.')[0])
+                if frame_num not in self.blurred_cache:
+                    self.blurred_cache[frame_num] = cv2.imread(cache_path)
+                    self.blurred_frames.add(frame_num)
+
         in_cap = cv2.VideoCapture(self.video_path, cv2.CAP_FFMPEG)
         try:
             in_cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
@@ -558,13 +582,17 @@ class EditorCore:
             if frame.shape[1] != out_w or frame.shape[0] != out_h:
                 frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
 
+            # model.py — _write_intermediate_with_opencv
             if i in self.blurred_frames and i in self.blurred_cache:
                 writer.write(self.blurred_cache[i])
             elif i in self.blurred_frames:
-                from utilities import blur_faces_of_person
-                writer.write(blur_faces_of_person(frame))
+                people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+                if people:
+                    frame = blur_faces_of_person(frame, people[0])
+                writer.write(frame)
             else:
                 writer.write(frame)
+
 
             if progress_cb and (i % 10 == 0 or i == total - 1):
                 try:

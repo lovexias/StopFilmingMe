@@ -79,17 +79,41 @@ class BlurPersonWorker(QThread):
     def run(self):
         import cv2
         # Load video properties
+        # main.py — inside class BlurPersonWorker.run
+
         cap = cv2.VideoCapture(self.core.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         rotation = getattr(self.core, "rotation_angle", 0)
 
-        self.core.blurred_cache.clear()  # Clear any previous blurred frames
+        # clear previous results
+        self.core.blurred_cache.clear()
+        self.core.blurred_frames.clear()
+
+        # reference bbox for the selected person (from the detection pass)
+        ref_bbox = None
+        for person in getattr(self.core, "detected_people", []):
+            if person.get("person_id") == self.sel_pid:
+                ref_bbox = person.get("bbox")
+                break
+
+        def iou(a, b):
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            inter_x1, inter_y1 = max(ax1, bx1), max(ay1, by1)
+            inter_x2, inter_y2 = min(ax2, bx2), min(ay2, by2)
+            iw, ih = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
+            inter = iw * ih
+            if inter == 0: return 0.0
+            area_a = (ax2 - ax1) * (ay2 - ay1)
+            area_b = (bx2 - bx1) * (by2 - by1)
+            return inter / float(area_a + area_b - inter + 1e-6)
+
         for frame_idx in range(total_frames):
             ret, frame = cap.read()
             if not ret:
                 break
 
-            # Apply rotation if needed
+            # apply rotation
             if rotation == 90:
                 frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             elif rotation == 180:
@@ -97,19 +121,28 @@ class BlurPersonWorker(QThread):
             elif rotation == 270:
                 frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-            # Blur the selected person's face
-            for person in self.core.detected_people:
-                if person["person_id"] == self.sel_pid:
-                    frame = blur_faces_of_person(frame, person["bbox"])
+            # detect people on this frame
+            candidates = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
 
-            # Cache the blurred frame
-            self.core.blurred_cache[frame_idx] = frame
+            # choose which bbox to blur this frame:
+            blur_bbox = None
+            if ref_bbox and candidates:
+                # match the candidate with highest IoU to our reference bbox
+                blur_bbox = max(candidates, key=lambda b: iou(ref_bbox, b))
+                # optional: require a small overlap to avoid false matches
+                if iou(ref_bbox, blur_bbox) < 0.05:
+                    blur_bbox = None
 
-            # Emit progress
-            self.progress.emit(int(frame_idx / total_frames * 100))
+            if blur_bbox is not None:
+                frame = blur_faces_of_person(frame, blur_bbox)
+                self.core.blurred_cache[frame_idx] = frame
+                self.core.blurred_frames.add(frame_idx)  # ← CRITICAL
+            # progress
+            self.progress.emit(int(frame_idx / max(1, total_frames) * 100))
 
         cap.release()
         self.finished.emit()
+
 
 class GestureDetectWorker(QThread):
     finished = pyqtSignal(object)
@@ -423,6 +456,25 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
     # ---------- Other functions remain unchanged...
+
+   
+    # main.py — inside class MainWindow
+    def _toast(self, text: str, title: str = "StopFilming", ms: int = 1500):
+        dlg = ProcessingDialog(self, title=title, message=text, total_steps=None)
+        dlg.setWindowModality(Qt.NonModal)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+
+        # place near bottom-right of the main window
+        parent_geo = self.geometry()
+        dlg.adjustSize()
+        x = parent_geo.x() + parent_geo.width() - dlg.width() - 24
+        y = parent_geo.y() + parent_geo.height() - dlg.height() - 24
+        dlg.move(max(0, x), max(0, y))
+
+        dlg.show()
+        QTimer.singleShot(ms, dlg.accept)
+
+
 
 
     def _on_save_project(self):
@@ -821,15 +873,17 @@ class MainWindow(QMainWindow):
         import tempfile, gc, cv2, os
 
         # Ensure gesture detections exist
+        # (A) No detected gestures
         if not hasattr(self, "people_to_blur") or not self.people_to_blur:
-            QMessageBox.information(self, "Blur", "No detected gestures found.")
+            self._toast("No detected gestures found.", title="Blur – StopFilming")
             return
 
-        # Ensure a person is selected
+        # (B) No selection
         selected_item = self.editor_panel.gesture_list.currentItem()
         if not selected_item:
-            QMessageBox.information(self, "Blur", "Please select a person to blur from the list.")
+            self._toast("Please select a person to blur from the list.", title="Blur – StopFilming")
             return
+
 
         selected_data = selected_item.data(Qt.UserRole)
         if not selected_data or "person_id" not in selected_data:
@@ -910,6 +964,7 @@ class MainWindow(QMainWindow):
 
             # Keep small memory window
             self.core.blurred_cache[frame_idx] = blurred_frame
+            self.core.blurred_frames.add(frame_idx) # new for exporting
             if len(self.core.blurred_cache) > 20:
                 oldest_key = min(self.core.blurred_cache.keys())
                 del self.core.blurred_cache[oldest_key]
@@ -939,11 +994,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Blurring updated for {len(self.persistent_blur_ids)} person(s)"
         )
-        QMessageBox.information(
-            self, "Blur Updated",
-            f"Blurring complete for Person {selected_pid}.\n"
-            f"Now blurring {len(self.persistent_blur_ids)} person(s) in total."
+        self._toast(
+            f"Blurring complete for Person {selected_pid}. "
+            f"Now blurring {len(self.persistent_blur_ids)} person(s) in total.",
+            title="Blur Updated – StopFilming"
         )
+
+        print(f"DEBUG: blurred_frames has {len(self.core.blurred_frames)} frames")
+        print(f"DEBUG: blurred_cache has {len(self.core.blurred_cache)} frames")
+        print(f"DEBUG: Sample frame indices: {list(self.core.blurred_frames)[:10]}")
 
 
     def _on_gesture_detection_finished(self, people_with_gestures):
@@ -989,6 +1048,7 @@ class MainWindow(QMainWindow):
         self.editor_panel.display_frame(img, frame_idx)
         self.editor_panel.blur_button.setEnabled(True)
 
+    #------highlight
     def _on_gesture_item_clicked(self, payload):
         pid, gest, bbox = "?", "", None
 
@@ -1027,11 +1087,52 @@ class MainWindow(QMainWindow):
             finally:
                 sld.blockSignals(False)
 
+        # Jump to the frame
         self._on_frame_changed(frame_idx)
+
+        # Highlight the person if we have a bounding box
+        if bbox:
+            # Apply rotation to bbox if needed before highlighting
+            if hasattr(self.core, 'rotation_angle') and self.core.rotation_angle != 0:
+                # Get the frame to determine dimensions after rotation
+                frame = self.core.get_frame(frame_idx)
+                if frame is not None:
+                    h, w = frame.shape[:2]
+                    bbox = self._rotate_bbox(bbox, w, h, self.core.rotation_angle)
+            
+            self.editor_panel.highlight_person_on_frame(bbox)
 
         if gest:
             self.editor_panel.show_selection_badge(f"Selected: Person {pid} • {gest}")
             self.statusBar().showMessage(f"Selected Person {pid} • {gest} @ frame {frame_idx}")
+
+    def _rotate_bbox(self, bbox, width, height, rotation):
+        """Rotate bounding box coordinates to match rotated frame"""
+        x1, y1, x2, y2 = bbox
+        
+        if rotation == 90:
+            # 90° clockwise rotation
+            new_x1 = y1
+            new_y1 = width - x2
+            new_x2 = y2
+            new_y2 = width - x1
+            return (new_x1, new_y1, new_x2, new_y2)
+        elif rotation == 180:
+            # 180° rotation
+            new_x1 = width - x2
+            new_y1 = height - y2
+            new_x2 = width - x1
+            new_y2 = height - y1
+            return (new_x1, new_y1, new_x2, new_y2)
+        elif rotation == 270:
+            # 270° clockwise (90° counter-clockwise)
+            new_x1 = height - y2
+            new_y1 = x1
+            new_x2 = height - y1
+            new_y2 = x2
+            return (new_x1, new_y1, new_x2, new_y2)
+        
+        return bbox  # No rotation
 
     # ---------- misc ----------
     def _open_documentation(self):

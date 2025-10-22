@@ -1332,7 +1332,153 @@ class EnhancedEditorPanel(QWidget):
         btn_row.addStretch()
         
         parent_layout.addLayout(btn_row)
+    #-----------------------------------------
+    #to highlight the person
+    def highlight_person_on_frame(self, bbox):
+        """Draw a highlighted bounding box overlay on the current frame to show detected person"""
+        if not bbox or len(bbox) != 4:
+            return
+        
+        # Create a custom transparent widget for the highlight
+        if not hasattr(self, 'highlight_widget'):
+            class TransparentHighlight(QWidget):
+                def __init__(self, parent):
+                    super().__init__(parent)
+                    self.setAttribute(Qt.WA_TransparentForMouseEvents)
+                    self.setAttribute(Qt.WA_TranslucentBackground)
+                    self.setStyleSheet("background: transparent;")
+                    self.bbox_rect = None
+                    self.pulse_value = 3  # Start at normal width
+                    self.opacity = 255
+                    
+                def set_bbox(self, x, y, w, h):
+                    self.bbox_rect = (x, y, w, h)
+                    self.update()
+                    
+                def set_pulse(self, value):
+                    self.pulse_value = value
+                    self.opacity = int(180 + (value - 3) * 25)  # Vary opacity with pulse
+                    self.update()
+                    
+                def paintEvent(self, event):
+                    if not self.bbox_rect:
+                        return
+                        
+                    painter = QPainter(self)
+                    painter.setRenderHint(QPainter.Antialiasing)
+                    
+                    # Draw yellow outline with variable width from pulse
+                    color = QColor(255, 215, 0, self.opacity)
+                    pen = QPen(color, self.pulse_value)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)  # No fill!
+                    
+                    x, y, w, h = self.bbox_rect
+                    painter.drawRect(2, 2, w-4, h-4)  # Slight inset to avoid clipping
+                    
+                    # Draw corner accents (always bright)
+                    corner_len = 20
+                    accent_color = QColor(255, 215, 0, 255)  # Full opacity for accents
+                    pen_thick = QPen(accent_color, self.pulse_value + 2)
+                    painter.setPen(pen_thick)
+                    
+                    # Top-left
+                    painter.drawLine(0, 0, corner_len, 0)
+                    painter.drawLine(0, 0, 0, corner_len)
+                    
+                    # Top-right  
+                    painter.drawLine(w-corner_len, 0, w, 0)
+                    painter.drawLine(w-1, 0, w-1, corner_len)
+                    
+                    # Bottom-left
+                    painter.drawLine(0, h-corner_len, 0, h)
+                    painter.drawLine(0, h-1, corner_len, h-1)
+                    
+                    # Bottom-right
+                    painter.drawLine(w-corner_len, h-1, w, h-1)
+                    painter.drawLine(w-1, h-corner_len, w-1, h)
+            
+            self.highlight_widget = TransparentHighlight(self.video_display)
+            self.highlight_widget.hide()
+        
+        # Calculate display coordinates from bbox
+        if hasattr(self.video_display, '_ar') and self.video_display._ar:
+            display_rect = self.video_display.rect()
+            display_width = display_rect.width()
+            display_height = display_rect.height()
+            
+            video_ar = self.video_display._ar
+            current_ar = display_width / display_height if display_height > 0 else 1
+            
+            if current_ar > video_ar:
+                actual_height = display_height
+                actual_width = int(actual_height * video_ar)
+                offset_x = (display_width - actual_width) // 2
+                offset_y = 0
+            else:
+                actual_width = display_width
+                actual_height = int(actual_width / video_ar)
+                offset_x = 0
+                offset_y = (display_height - actual_height) // 2
+            
+            if hasattr(self.video_display, '_qimg') and self.video_display._qimg:
+                orig_width = self.video_display._qimg.width()
+                orig_height = self.video_display._qimg.height()
+            else:
+                orig_width = 1920
+                orig_height = int(orig_width / video_ar)
+            
+            x1, y1, x2, y2 = bbox
+            scale_x = actual_width / orig_width
+            scale_y = actual_height / orig_height
+            
+            display_x1 = int(x1 * scale_x) + offset_x
+            display_y1 = int(y1 * scale_y) + offset_y
+            display_width = int((x2 - x1) * scale_x)
+            display_height = int((y2 - y1) * scale_y)
+            
+            # Set position and size
+            self.highlight_widget.setGeometry(display_x1, display_y1, display_width, display_height)
+            self.highlight_widget.set_bbox(display_x1, display_y1, display_width, display_height)
+            self.highlight_widget.show()
+            
+            # Start pulse animation
+            self.start_pulse_animation()
+            
+            # Auto-hide after 4 seconds
+            QTimer.singleShot(4000, self.hide_person_highlight)
 
+    def start_pulse_animation(self):
+        """Create a pulsing effect by animating the border width"""
+        if not hasattr(self, 'pulse_timer'):
+            self.pulse_timer = QTimer()
+            self.pulse_direction = 1
+            self.pulse_value = 3
+            
+            def pulse_step():
+                self.pulse_value += self.pulse_direction * 0.5
+                if self.pulse_value >= 6:
+                    self.pulse_value = 6
+                    self.pulse_direction = -1
+                elif self.pulse_value <= 3:
+                    self.pulse_value = 3
+                    self.pulse_direction = 1
+                
+                if hasattr(self, 'highlight_widget'):
+                    self.highlight_widget.set_pulse(int(self.pulse_value))
+            
+            self.pulse_timer.timeout.connect(pulse_step)
+        
+        self.pulse_timer.start(50)  # Update every 50ms for smooth animation
+
+    def hide_person_highlight(self):
+        """Hide the person highlight overlay"""
+        if hasattr(self, 'highlight_widget'):
+            self.highlight_widget.hide()
+        if hasattr(self, 'pulse_timer'):
+            self.pulse_timer.stop()
+
+    #---------------------------------
     def create_enhanced_markers_panel(self, parent_splitter):
         """
         Professional right sidebar with four cards: Video Properties, Detection Settings, Blur Settings, Detected Gestures
