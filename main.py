@@ -33,7 +33,8 @@ from utilities import (
     PersonTracker,
     detect_multiple_people_yolov8,
     detect_gesture_in_person_box,
-    blur_faces_of_person,   # <-- add this
+    blur_faces_of_person,
+    mp_face_global,  # ADD THIS
 )
 
 
@@ -674,7 +675,7 @@ class MainWindow(QMainWindow):
         cap.release()
 
         print("=" * 70)
-        print("PASS 1: OPTIMIZED GESTURE DETECTION (Improved Skip Logic)")
+        print("PASS 1: OPTIMIZED GESTURE DETECTION (No YOLO during gesture analysis)")
         print("=" * 70)
         print(f"Video: {video_path}")
         print(f"Total Frames: {total_frames}, FPS: {fps:.2f}, Rotation: {rotation}°")
@@ -688,9 +689,12 @@ class MainWindow(QMainWindow):
         discovered_people = []
         people_to_blur = []
         gestures_to_check = ["wave", "hand_over_face"]
+        
+        # NEW: Cache person bboxes during discovery
+        person_bbox_cache = {}  # person_id -> list of (frame_num, bbox)
 
-        # STEP 1: Discover people
-        print("\n📋 STEP 1: Discovering people...")
+        # STEP 1: Discover people AND CACHE THEIR BBOXES
+        print("\n📋 STEP 1: Discovering people and caching bboxes...")
         cap = cv2.VideoCapture(video_path)
         for frame_idx in range(0, total_frames, DISCOVERY_FRAME_SKIP):
             ret, frame = cap.read()
@@ -711,7 +715,12 @@ class MainWindow(QMainWindow):
                 for pid in current_people.keys():
                     if pid not in discovered_people:
                         discovered_people.append(pid)
+                        person_bbox_cache[pid] = []
                         print(f"  👤 New person detected: ID {pid} @ frame {frame_idx}")
+                    
+                    # CACHE: Store bbox for this person at this frame
+                    bbox = current_people[pid]["bbox"]
+                    person_bbox_cache[pid].append((frame_idx, bbox))
 
             progress = int((frame_idx / total_frames) * 40)
             self.proc.set_progress(progress, label=f"Stage 1 – Discovering People: {progress}%")
@@ -720,9 +729,10 @@ class MainWindow(QMainWindow):
 
         cap.release()
         print(f"\n✅ STEP 1 COMPLETE: {len(discovered_people)} people discovered.")
+        print(f"📦 Cached bboxes for {len(person_bbox_cache)} people")
 
-               # STEP 2: Analyze gestures
-        print("\n🔍 STEP 2: Analyzing gestures (adaptive clarity filter)...")
+        # STEP 2: Analyze gestures WITHOUT YOLO (use cached bboxes)
+        print("\n🔍 STEP 2: Analyzing gestures (YOLO-free, using cached bboxes)...")
         gesture_found_for_person = {pid: False for pid in discovered_people}
         unclear_face_for_person = {pid: False for pid in discovered_people}
 
@@ -767,6 +777,17 @@ class MainWindow(QMainWindow):
                 print(f"  ➤ Analyzing Person {pid} for {gesture_type}...")
                 gesture_detected = False
                 cap = cv2.VideoCapture(video_path)
+                
+                last_good_frame = -1
+                consecutive_bad_frames = 0
+                face_visibility_score = 0
+
+                # NEW: Use cached bboxes instead of re-detecting with YOLO
+                cached_bboxes = person_bbox_cache.get(pid, [])
+                if not cached_bboxes:
+                    print(f"  ⚠️ No cached bboxes for Person {pid}, skipping")
+                    analyzed_count += 1
+                    continue
 
                 for frame_num in range(0, total_frames, ANALYSIS_FRAME_SKIP):
                     # Early skip if already found
@@ -786,34 +807,92 @@ class MainWindow(QMainWindow):
                     elif rotation == 270:
                         frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-                    people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-                    if not people_detected:
+                    # NEW: Find nearest cached bbox instead of running YOLO
+                    best_bbox = None
+                    min_frame_dist = float('inf')
+                    closest_frame_before = None
+                    closest_frame_after = None
+                    
+                    # Find frames before and after current frame
+                    for cached_frame, cached_bbox in cached_bboxes:
+                        frame_dist = abs(frame_num - cached_frame)
+                        
+                        if cached_frame <= frame_num and (closest_frame_before is None or cached_frame > closest_frame_before[0]):
+                            closest_frame_before = (cached_frame, cached_bbox)
+                        if cached_frame > frame_num and (closest_frame_after is None or cached_frame < closest_frame_after[0]):
+                            closest_frame_after = (cached_frame, cached_bbox)
+                    
+                    # Interpolate position if we have frames on both sides
+                    if closest_frame_before is not None and closest_frame_after is not None:
+                        frame_b, bbox_b = closest_frame_before
+                        frame_a, bbox_a = closest_frame_after
+                        
+                        # Linear interpolation weight
+                        t = (frame_num - frame_b) / (frame_a - frame_b)
+                        
+                        # Interpolate each coordinate
+                        x1_b, y1_b, x2_b, y2_b = bbox_b
+                        x1_a, y1_a, x2_a, y2_a = bbox_a
+                        
+                        x1_interp = int(x1_b + t * (x1_a - x1_b))
+                        y1_interp = int(y1_b + t * (y1_a - y1_b))
+                        x2_interp = int(x2_b + t * (x2_a - x2_b))
+                        y2_interp = int(y2_b + t * (y2_a - y2_b))
+                        
+                        best_bbox = (x1_interp, y1_interp, x2_interp, y2_interp)
+                        print(f"  📍 Interpolated bbox @ frame {frame_num}: {best_bbox}")
+                    
+                    # Fallback: use nearest single bbox if only one side available
+                    elif closest_frame_before is not None:
+                        best_bbox = closest_frame_before[1]
+                    elif closest_frame_after is not None:
+                        best_bbox = closest_frame_after[1]
+                    
+                    # Only use bbox if it's within reasonable frame distance
+                    if best_bbox is None:
+                        consecutive_bad_frames += 1
+                        if consecutive_bad_frames > 5:
+                            print(f"  ⏭️ Person {pid} bbox not found for 5+ checks, skipping")
+                            break
                         continue
+                    
+                    x1, y1, x2, y2 = map(int, best_bbox)
 
-                    current_people = person_tracker.update(frame, people_detected, frame_num)
-                    if pid in current_people:
-                        person_data = current_people[pid]
-                        bbox = person_data["bbox"]
-                        x1, y1, x2, y2 = map(int, bbox)
+                    # 👇 SPEED: Adaptive clarity check BEFORE expensive gesture detection
+                    roi = frame[y1:y2, x1:x2]
+                    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+                    brightness = gray.mean()
+                    area = (x2 - x1) * (y2 - y1)
 
-                        # 👇 Adaptive clarity check
-                        roi = frame[y1:y2, x1:x2]
-                        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-                        brightness = gray.mean()
-                        area = (x2 - x1) * (y2 - y1)
-
-                        if sharpness < sharp_thresh or brightness < bright_thresh or area < area_thresh:
+                    # NEW: Check if face is actually visible & clear
+                    face_clear = mp_face_global.process(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
+                    has_face = face_clear.detections is not None and len(face_clear.detections) > 0
+                    
+                    # SPEED: Skip poor-quality frames entirely
+                    if sharpness < sharp_thresh or brightness < bright_thresh or area < area_thresh:
+                        consecutive_bad_frames += 1
+                        if not has_face:
+                            face_visibility_score -= 1
+                        
+                        if consecutive_bad_frames > 8 or face_visibility_score < -3:
                             unclear_face_for_person[pid] = True
                             print(
-                                f"🚫 Person {pid} face unclear "
+                                f"🚫 Person {pid} face consistently unclear "
                                 f"(sharp={sharpness:.1f}/{sharp_thresh:.1f}, "
-                                f"bright={brightness:.1f}/{bright_thresh:.1f}) – skipping."
+                                f"face_vis={face_visibility_score}) – skipping."
                             )
-                            break  # stop analyzing this person
+                            break
+                        continue
 
+                    # Only run gesture detection if frame quality is good AND face is visible
+                    if has_face:
+                        consecutive_bad_frames = 0
+                        face_visibility_score += 1
+                        last_good_frame = frame_num
+                        
                         detected = detect_gesture_in_person_box(
-                            bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION
+                            best_bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION
                         )
                         if detected:
                             gesture_detected = True
@@ -823,9 +902,12 @@ class MainWindow(QMainWindow):
                                 "person_id": pid,
                                 "gesture": gesture_type,
                                 "frame": frame_num,
-                                "bbox": bbox
+                                "bbox": best_bbox
                             })
                             break
+                    else:
+                        face_visibility_score -= 0.5
+                        consecutive_bad_frames += 1
 
                 cap.release()
                 analyzed_count += 1
@@ -866,7 +948,7 @@ class MainWindow(QMainWindow):
 
         has_items = self.editor_panel.gesture_list.count() > 0
         self.editor_panel.blur_button.setEnabled(has_items)
-        self.statusBar().showMessage(f"Detected {len(people_to_blur)} gesture(s)")
+        self.statusBar().showMessage(f"Detected {self.editor_panel.gesture_list.count()} gesture(s)")
         if hasattr(self, "proc"):
             self.proc.finish("Gesture detection complete")
             self.proc = None

@@ -1,1 +1,1 @@
-detector
+ore and after 

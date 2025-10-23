@@ -668,8 +668,12 @@ def adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame_shape, target_aspect_
     
     return int(new_x1), int(new_y1), int(new_x2), int(new_y2)
 
+# ADD: Global gesture cache to avoid re-detecting same person
+_gesture_cache = {}  # (person_id, gesture_type) -> (result, frame_count)
+_gesture_cache_ttl = 150  # frames before expiry
+
 def detect_gesture_in_person_box(person_box, frame_source, gesture_type="wave", fps=30, duration_seconds=2):
-    """OPTIMIZED: Detect gestures within a person's bounding box."""
+    """OPTIMIZED: Fast gesture detection with minimal temp video overhead."""
     
     # Handle different bbox formats
     if isinstance(person_box, (list, tuple)):
@@ -731,6 +735,7 @@ def detect_gesture_in_person_box(person_box, frame_source, gesture_type="wave", 
     else:
         print(f"ERROR: Invalid bbox type: {type(person_box)}, value: {person_box}")
         return False
+    
     frames_to_collect = int(fps * duration_seconds)
     
     # Get frame dimensions to ensure bbox is within bounds
@@ -739,78 +744,185 @@ def detect_gesture_in_person_box(person_box, frame_source, gesture_type="wave", 
         return False
     
     frame_h, frame_w = test_frame.shape[:2]
-    frame_source.set(cv2.CAP_PROP_POS_FRAMES, frame_source.get(cv2.CAP_PROP_POS_FRAMES) - 1)  # Go back one frame
+    current_frame_pos = frame_source.get(cv2.CAP_PROP_POS_FRAMES) - 1
+    frame_source.set(cv2.CAP_PROP_POS_FRAMES, current_frame_pos)
     
-    # Ensure bbox is within frame bounds
+    # Cache check
+    cache_key = (id(frame_source), gesture_type)
+    if cache_key in _gesture_cache:
+        cached_result, cached_frame = _gesture_cache[cache_key]
+        frames_since = abs(current_frame_pos - cached_frame)
+        if frames_since < _gesture_cache_ttl:
+            return cached_result
+    
+    # Bounds checking
+    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
     x1 = max(0, min(x1, frame_w - 1))
     y1 = max(0, min(y1, frame_h - 1))
     x2 = max(x1 + 1, min(x2, frame_w))
     y2 = max(y1 + 1, min(y2, frame_h))
     
+    # Pre-filter: Sample first frame's clarity
+    temp_ret, temp_frame = frame_source.read()
+    if temp_ret:
+        roi = temp_frame[y1:y2, x1:x2]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+        brightness = gray.mean()
+        
+        if sharpness < 10 or brightness < 30:
+            _gesture_cache[cache_key] = (False, current_frame_pos)
+            return False
+    
+    frame_source.set(cv2.CAP_PROP_POS_FRAMES, current_frame_pos)
+    
     person_frames = []
-    current_pos = frame_source.get(cv2.CAP_PROP_POS_FRAMES)
     
     for _ in range(frames_to_collect):
         ret, frame = frame_source.read()
         if not ret:
             break
-            
+        
         adj_x1, adj_y1, adj_x2, adj_y2 = adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame.shape)
         person_crop = frame[adj_y1:adj_y2, adj_x1:adj_x2]
         
         if person_crop.size == 0:
             continue
-            
-        # OPTIMIZATION: Scale up small crops for better processing
+        
+        # Scale up small crops
         if person_crop.shape[0] < 300 or person_crop.shape[1] < 200:
             scale_factor = max(300 / person_crop.shape[0], 200 / person_crop.shape[1])
             new_height = int(person_crop.shape[0] * scale_factor)
             new_width = int(person_crop.shape[1] * scale_factor)
             person_crop = cv2.resize(person_crop, (new_width, new_height))
-            
+        
         person_frames.append(person_crop.copy())
     
     # Reset video position
-    frame_source.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+    frame_source.set(cv2.CAP_PROP_POS_FRAMES, current_frame_pos)
     
     if len(person_frames) < 10:
+        _gesture_cache[cache_key] = (False, current_frame_pos)
         return False
+    
+    # ═══════════════════════════════════════════════════════════
+    # OPTIMIZATION: Minimal temp video with fresh detectors per person
+    # ═══════════════════════════════════════════════════════════
+    import tempfile
+    
+    with tempfile.NamedTemporaryFile(suffix='.avi', delete=False) as tmp:
+        temp_video_path = tmp.name
+    
+    try:
+        # Write cropped frames to temp video (FAST: no compression, low quality)
+        height, width = person_frames[0].shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
         
-    # Create temporary video for gesture detection
-    temp_video_path = "temp_person_crop.avi"
-    height, width = person_frames[0].shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
-    
-    for frame in person_frames:
-        out.write(frame)
-    out.release()
-    
-    # Run gesture detection with higher confidence
-    gesture_detected = False
-    try:
+        for frame in person_frames:
+            out.write(frame)
+        out.release()
+        
+        # Create FRESH detectors for THIS person only
         if gesture_type == "wave":
+            hands = mp.solutions.hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+            pose = mp.solutions.pose.Pose(static_image_mode=False, model_complexity=1, min_detection_confidence=0.7)
             detector = WaveDetector(temp_video_path, fps, detection_confidence=0.7)
-            detected_frames = detector.detect_wave_timestamps(show_ui=False, frame_skip=3)
         elif gesture_type == "hand_over_face":
+            hands = mp.solutions.hands.Hands(max_num_hands=2, min_detection_confidence=0.6)
+            pose = mp.solutions.pose.Pose(static_image_mode=False, model_complexity=1, min_detection_confidence=0.6)
             detector = HandOverFaceDetector(temp_video_path, fps, detection_confidence=0.6)
-            detected_frames = detector.detect_hand_over_face_frames(show_ui=False, frame_skip=3)
         else:
-            detected_frames = []
-
-        gesture_detected = len(detected_frames) > 0
-
-    except Exception as e:
+            return False
+        
+        # Run detection
         gesture_detected = False
+        try:
+            if gesture_type == "wave":
+                detected_frames = detector.detect_wave_timestamps(show_ui=False, frame_skip=3)
+            elif gesture_type == "hand_over_face":
+                detected_frames = detector.detect_hand_over_face_frames(show_ui=False, frame_skip=3)
+            else:
+                detected_frames = []
+            
+            gesture_detected = len(detected_frames) > 0
+            
+        except Exception as e:
+            gesture_detected = False
+        finally:
+            hands.close()
+            pose.close()
+        
+        _gesture_cache[cache_key] = (gesture_detected, current_frame_pos)
+        return gesture_detected
+        
+    finally:
+        # Clean up temp file
+        try:
+            if os.path.exists(temp_video_path):
+                os.remove(temp_video_path)
+        except:
+            pass
+
+def _analyze_wave_gesture(hand_detections, total_frames):
+    """Analyze hand movement pattern for wave gesture."""
+    if len(hand_detections) < 4:
+        return False
     
-    # Clean up
-    try:
-        if os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
-    except:
-        pass
+    # Check for consistent left-right movement
+    x_positions = []
+    for frame_idx, landmarks in hand_detections:
+        xs = [lm.x for hand in landmarks for lm in hand.landmark]
+        if xs:
+            x_positions.append(sum(xs) / len(xs))
     
-    return gesture_detected
+    if len(x_positions) < 4:
+        return False
+    
+    # Look for oscillation pattern (left → right → left or vice versa)
+    direction_changes = 0
+    for i in range(1, len(x_positions)):
+        if (x_positions[i] - x_positions[i-1]) * (x_positions[i-1] - (x_positions[i-2] if i > 1 else 0)) < 0:
+            direction_changes += 1
+    
+    # Wave typically has 2+ direction changes in a short sequence
+    return direction_changes >= 2
+
+
+def _analyze_hand_over_face(hand_detections, pose_landmarks_list, person_frames):
+    """Analyze if hand is consistently near face."""
+    if not hand_detections or not pose_landmarks_list:
+        return False
+    
+    hand_near_face_count = 0
+    
+    for h_idx, (h_frame, hand_landmarks) in enumerate(hand_detections):
+        # Find corresponding pose frame
+        pose_frame = next((p_frame for p_frame, _ in pose_landmarks_list if p_frame == h_frame), None)
+        if pose_frame is None:
+            continue
+        
+        pose_lm = next(lm for f, lm in pose_landmarks_list if f == pose_frame)
+        
+        # Get nose position
+        nose = pose_lm.landmark[mp.solutions.pose.PoseLandmark.NOSE]
+        frame_h, frame_w = person_frames[h_frame].shape[:2]
+        nose_x = int(nose.x * frame_w)
+        nose_y = int(nose.y * frame_h)
+        
+        # Check hand proximity to nose
+        for hand in hand_landmarks:
+            for lm in hand.landmark:
+                hand_x = int(lm.x * frame_w)
+                hand_y = int(lm.y * frame_h)
+                dist = np.hypot(nose_x - hand_x, nose_y - hand_y)
+                
+                if dist < 60:  # Within 60 pixels of nose
+                    hand_near_face_count += 1
+                    break
+    
+    # Hand over face detected if present in >30% of frames
+    return hand_near_face_count > len(hand_detections) * 0.3
 
 # Legacy support functions
 def match_person_id(existing_people, new_landmarks, tolerance=0.7):
