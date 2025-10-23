@@ -435,19 +435,19 @@ class EditorCore:
             output_path = root + want_ext
 
         # 0) If nothing was blurred, fast remux/copy original -> output
-        if not self.blurred_frames:
+        has_disk_blurs = bool(
+            getattr(self, "blur_cache_dir", None)
+            and os.path.isdir(self.blur_cache_dir)
+            and any(n.endswith(".jpg") for n in os.listdir(self.blur_cache_dir))
+        )
+        if not (self.blurred_frames or has_disk_blurs):
+            # nothing blurred → copy original
             ffmpeg = shutil.which("ffmpeg")
             if ffmpeg:
-                # Stream copy both audio & video (no re-encode)
-                cmd = [
-                    ffmpeg, "-y", "-i", self.video_path,
-                    "-c", "copy",
-                    output_path
-                ]
+                cmd = [ffmpeg, "-y", "-i", self.video_path, "-c", "copy", output_path]
                 subprocess.run(cmd, check=False)
                 return os.path.exists(output_path)
             else:
-                # As a fallback, just copy the file
                 try:
                     shutil.copy2(self.video_path, output_path)
                     return True

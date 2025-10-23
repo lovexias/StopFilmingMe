@@ -22,13 +22,13 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAction, QFileDialog, QMessageBox, QDialog,
     QListWidgetItem  # Add this import
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QElapsedTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QElapsedTimer,QSettings
 from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor, QPen, QBrush
 
 from view import KeyboardShortcutsDialog
 from view import EditorPanel, ProcessingDialog, ExportDialog
 from model import EditorCore
-import tempfile, shutil
+import tempfile, shutil, gc
 from utilities import (
     PersonTracker,
     detect_multiple_people_yolov8,
@@ -294,6 +294,12 @@ class MainWindow(QMainWindow):
         self.memory_timer.timeout.connect(self._check_memory)
         self.memory_timer.start(5000)
 
+        self._mem_warned_once = False
+        self._mem_next_warn_ts = 0.0  # cooldown gate
+        # persistent “don’t show again”
+        self._settings = QSettings("StopFilming", "StopFilmingApp")
+        self._mem_warn_suppressed = bool(self._settings.value("memory/warnings_suppressed", False, type=bool))
+
         # Menubar
         menubar = self.menuBar()  # Add this line to define the menubar
         self.menuBar().setStyleSheet(""" 
@@ -329,9 +335,9 @@ class MainWindow(QMainWindow):
         redo_action = QAction("Redo", self); redo_action.setShortcut("Ctrl+Y"); redo_action.triggered.connect(lambda: None)
         edit_menu.addAction(undo_action); edit_menu.addAction(redo_action)
         edit_menu.addSeparator()
-        preferences_action = QAction("Preferences...", self)
-        preferences_action.triggered.connect(self._toggle_appearance)
-        edit_menu.addAction(preferences_action)
+        #preferences_action = QAction("Preferences...", self)
+        #preferences_action.triggered.connect(self._toggle_appearance)
+        #edit_menu.addAction(preferences_action)
 
         # View
         view_menu = menubar.addMenu("View")
@@ -348,6 +354,14 @@ class MainWindow(QMainWindow):
             lambda checked: self.editor_panel.gesture_list.parentWidget().setVisible(checked)
         )
         view_menu.addAction(toggle_markers_action)
+
+        # ---- Add this right after view_menu.addAction(fullscreen_action) ----
+        self.warn_mem_action = QAction("Warn about Memory Usage", self, checkable=True)
+        self.warn_mem_action.setChecked(not self._mem_warn_suppressed)
+        self.warn_mem_action.toggled.connect(self._toggle_memory_warnings)
+        view_menu.addAction(self.warn_mem_action)
+# --------------------------------------------------------------------
+
 
         fullscreen_action = QAction("Fullscreen", self)
         fullscreen_action.setShortcut("F11")
@@ -384,28 +398,47 @@ class MainWindow(QMainWindow):
         shortcuts_action.triggered.connect(self._show_shortcuts_reference)
         help_menu.addAction(shortcuts_action)
         
+    
+    #supress memory issues
+    def _toggle_memory_warnings(self, enabled: bool):
+        # enabled=True means warnings ON; we store the inverse
+        self._mem_warn_suppressed = not enabled
+        self._settings.setValue("memory/warnings_suppressed", self._mem_warn_suppressed)
+
     #cancel blurring
     def _cancelled(self) -> bool:
         """True if the current ProcessingDialog was X-closed."""
         return bool(getattr(self, "proc", None) and self.proc.was_cancelled())
 
     # ---------- Menus and Controller slots ----------
+    
     def _check_memory(self):
-        """Monitor memory usage and show warnings"""
         try:
-            import psutil
+            import psutil, time, gc
             memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
-            if memory_mb > 2048:  # More than 2GB
-                print(f"⚠️ High memory usage: {memory_mb:.0f}MB")
+
+            if memory_mb > 2048:
+                # light, automatic cleanup
                 if hasattr(self.core, '_frame_cache'):
                     self.core._frame_cache.clear()
-                    print("🧹 Cleared frame cache")
-                import gc
+                if hasattr(self.core, 'blurred_cache'):
+                    cur = getattr(self.editor_panel, "current_frame_idx", 0)
+                    for k in list(self.core.blurred_cache.keys()):
+                        if abs(k - cur) > 8:
+                            del self.core.blurred_cache[k]
                 gc.collect()
-                if memory_mb > 4096:
-                    QMessageBox.warning(self, "Memory Warning", f"High memory usage detected ({memory_mb:.0f}MB).")
+
+            if memory_mb > 4096 and not self._mem_warn_suppressed:
+                now = time.time()
+                if (not self._mem_warned_once) or (now >= self._mem_next_warn_ts):
+                    self._toast(f"High memory usage detected ({memory_mb:.0f}MB). Continuing… freed caches.", ms=2500)
+                    self._mem_warned_once = True
+                    self._mem_next_warn_ts = now + 120  # 2 min cooldown
+
         except ImportError:
-            pass  # psutil not available
+            pass
+
+
 
     # ---------- Controller slots ----------
     def _on_import_requested(self):
@@ -519,32 +552,45 @@ class MainWindow(QMainWindow):
 
         self.proc = ProcessingDialog(
             self,
-            title="Detecting Gestures",
-            message="Analyzing video...",
+            title="Exporting Video",
+            message="Writing output file...",
             total_steps=100,
-            allow_cancel=True,          # ✖ cancels detection
-            show_cancel_button=False    # no visible Cancel button
+            allow_cancel=False,         # usually don't allow cancel for export
+            show_cancel_button=False
         )
-        self.proc.setWindowModality(Qt.ApplicationModal)
+        self.proc.setWindowModality(Qt.NonModal)          # <- non-modal
         self.proc.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.proc.show()
         QApplication.processEvents()
 
+
         
         self.export_thread = ExportWorker(self.core, out_path)
         self.export_thread.progress.connect(
-            lambda pct: self.proc.set_progress(int(max(0, min(100, pct))), label=f"{int(pct)}%")
+            lambda pct: (getattr(self, "proc", None) and
+                        self.proc.set_progress(int(max(0, min(100, pct))), label=f"{int(pct)}%"))
         )
-        
 
         def _done(ok, path):
             if getattr(self, "proc", None):
-                self.proc.finish("Export complete" if ok else "Export failed")
+                try:
+                    self.proc.finish("Export complete" if ok else "Export failed")
+                except Exception:
+                    try: self.proc.accept()
+                    except Exception: pass
                 self.proc = None
+
             if ok:
-                QMessageBox.information(self, "Export", f"Exported to:\n{path}")
+                # Non-modal, consistent with detect/blur
+                self._toast(f"Exported to:\n{path}", title="Export Complete", ms=3000)
+                self.statusBar().showMessage(f"Saved: {path}", 7000)
+                # Optional: auto-open folder (Windows)
+                # import os
+                # os.startfile(os.path.dirname(path))
             else:
-                QMessageBox.warning(self, "Export", "Failed to export edited video.")
+                self._toast("Failed to export edited video.", title="Export Failed", ms=3500)
+                self.statusBar().showMessage("Export failed", 7000)
+
             try:
                 self.export_thread.quit()
                 self.export_thread.wait()
@@ -553,7 +599,8 @@ class MainWindow(QMainWindow):
             self.export_thread = None
 
         self.export_thread.done.connect(_done)
-        self.export_thread.start()
+        self.export_thread.start()  
+
 
     def _on_clear_blurs(self):
         self.core.blurred_frames.clear()
@@ -668,6 +715,10 @@ class MainWindow(QMainWindow):
 
 
     def _on_detect_requested(self):
+        
+        self.editor_panel.start_detect_progress(total_steps=100)
+
+
         """Optimized gesture detection – stops analyzing a person once any gesture is detected."""
         if not self.core.video_path:
             QMessageBox.information(self, "Detection", "No video loaded.")
@@ -687,11 +738,10 @@ class MainWindow(QMainWindow):
         print(f"Video: {video_path}")
         print(f"Total Frames: {total_frames}, FPS: {fps:.2f}, Rotation: {rotation}°")
 
-        # Processing dialog TO CANCEL IT AS WELL
-        self.proc = ProcessingDialog(self, title="Detecting Gestures", message="Analyzing video...", total_steps=100)
-        self.proc.show()
-        QApplication.processEvents()
+  
+        
         #----------//
+
 
         person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
         discovered_people = []
@@ -702,14 +752,14 @@ class MainWindow(QMainWindow):
         print("\n📋 STEP 1: Discovering people...")
         cap = cv2.VideoCapture(video_path)
         for frame_idx in range(0, total_frames, DISCOVERY_FRAME_SKIP):
+            dlg = getattr(self.editor_panel, "_dlg_detect", None)
+            if dlg and dlg.was_cancelled():
+                self.editor_panel.finish_detect_progress(False)
+                return
             ret, frame = cap.read()
             if not ret:
                 break
 
-            if self._cancelled():
-                self.proc.finish("Cancelled")
-                self.proc = None
-                return
 
             # Rotate if needed
             if rotation == 90:
@@ -728,7 +778,10 @@ class MainWindow(QMainWindow):
                         print(f"  👤 New person detected: ID {pid} @ frame {frame_idx}")
 
             progress = int((frame_idx / total_frames) * 40)
-            self.proc.set_progress(progress, label=f"Stage 1 – Discovering People: {progress}%")
+            if not self.editor_panel.set_detect_progress(progress, f"Stage 1 – Discovering People: {progress}%"):
+                # user clicked ✖ → cancel
+                self.editor_panel.finish_detect_progress(False)
+                return
             self.statusBar().showMessage(f"Discovering people... {progress}%")
             QApplication.processEvents()
 
@@ -767,22 +820,11 @@ class MainWindow(QMainWindow):
         area_thresh = 5000                          # constant minimum box size
         print(f"🔧 Using thresholds → sharpness<{sharp_thresh:.1f}, brightness<{bright_thresh:.1f}, area<{area_thresh}")
 
-        if self._cancelled():
-            if 'cap' in locals(): cap.release()
-            self.statusBar().showMessage("Detection cancelled")
-            self.proc.finish("Cancelled")
-            self.proc = None
-            return
 
         for gesture_type in gestures_to_check:
             print(f"\n🎯 Checking gesture type: {gesture_type}")
 
-            if self._cancelled():
-                if 'cap' in locals(): cap.release()
-                self.statusBar().showMessage("Detection cancelled")
-                self.proc.finish("Cancelled")
-                self.proc = None
-                return
+    
             
             for pid in discovered_people:
                 # Skip if already detected or face unclear
@@ -798,12 +840,11 @@ class MainWindow(QMainWindow):
                 cap = cv2.VideoCapture(video_path)
 
                 for frame_num in range(0, total_frames, ANALYSIS_FRAME_SKIP):
-                    # Early skip if already found
-                    if self._cancelled():
-                        if 'cap' in locals(): cap.release()
-                        self.statusBar().showMessage("Detection cancelled")
-                        self.proc.finish("Cancelled")
-                        self.proc = None
+                  
+                    
+                    dlg = getattr(self.editor_panel, "_dlg_detect", None)
+                    if dlg and dlg.was_cancelled():
+                        self.editor_panel.finish_detect_progress(False)
                         return
 
                     if gesture_found_for_person[pid]:
@@ -866,9 +907,12 @@ class MainWindow(QMainWindow):
                 cap.release()
                 analyzed_count += 1
                 progress = max(0, min(100, 40 + int((analyzed_count / total_to_analyze) * 60)))
-                self.proc.set_progress(progress, label=f"Stage 2 – Detecting Gestures: {progress}%")
+                if not self.editor_panel.set_detect_progress(progress, f"Stage 2 – Detecting Gestures: {progress}%"):
+                    self.editor_panel.finish_detect_progress(False)
+                    return
                 self.statusBar().showMessage(f"Analyzing gestures... {progress}%")
                 QApplication.processEvents()
+                
 
                 # Stop if all people done or skipped
                 all_done = all(
@@ -903,15 +947,15 @@ class MainWindow(QMainWindow):
         has_items = self.editor_panel.gesture_list.count() > 0
         self.editor_panel.blur_button.setEnabled(has_items)
         self.statusBar().showMessage(f"Detected {len(people_to_blur)} gesture(s)")
-        if hasattr(self, "proc"):
-            self.proc.finish("Gesture detection complete")
-            self.proc = None
+     
 
         self.people_to_blur = people_to_blur
         self.person_tracker = person_tracker
         print("=" * 70)
         print("PASS 1 COMPLETE — Ready for blurring.")
         print("=" * 70)
+        # After you’ve updated the UI with results…
+        self.editor_panel.finish_detect_progress(True)
 
 
 
@@ -1171,9 +1215,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-            for idx, img in staged_cache.items():
-                self.core.blurred_cache[idx] = img
-                self.core.blurred_frames.add(idx)
+
+            #ram issues deletee
+            #for idx, img in staged_cache.items():
+               # self.core.blurred_cache[idx] = img
+                #self.core.blurred_frames.add(idx)
 
 
         # --- UI updates (multi-select safe) ---
@@ -1208,7 +1254,6 @@ class MainWindow(QMainWindow):
         """Handle completion of gesture detection."""
         # Close the processing dialog first
         if hasattr(self, "proc"):
-            self.proc.finish("Detection complete")
             self.proc = None
 
         # Convert dictionary format to tuple format expected by sorting
@@ -1365,8 +1410,10 @@ class MainWindow(QMainWindow):
     def _check_for_updates(self):
         QMessageBox.information(self, "Check for Updates", "No updates available.")
 
-    def _toggle_appearance(self):
-        QMessageBox.information(self, "Appearance", "Toggle light/dark (not implemented).")
+
+    #rmeove this is for preference if not used
+    #def _toggle_appearance(self):
+       # QMessageBox.information(self, "Appearance", "Toggle light/dark (not implemented).")
 
     def _show_shortcuts_reference(self):
         dlg = KeyboardShortcutsDialog(self)

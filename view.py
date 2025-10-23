@@ -438,7 +438,7 @@ class ProcessingDialog(QDialog):
     """
     Enhanced progress dialog with Premiere Pro styling
     """
-    def __init__(self, parent, title="Processing", message="Working...", total_steps=None, allow_cancel=False):
+    def __init__(self, parent, title="Processing", message="Working...", total_steps=None, allow_cancel=False, show_cancel_button=True):
         super().__init__(parent)
         # Fix: Clean up the title to avoid repetition
         clean_title = title.replace("StopFilming", "").replace("–", "").strip()
@@ -456,6 +456,7 @@ class ProcessingDialog(QDialog):
         self.allow_cancel = bool(allow_cancel)
         self.cancelled = False
         self.setAttribute(Qt.WA_DeleteOnClose, not self.allow_cancel) #cancel gesture
+    
 
         # Premiere Pro style progress dialog
         self.setStyleSheet(f"""
@@ -554,17 +555,6 @@ class ProcessingDialog(QDialog):
         info_row.addStretch()  # Push time to the right
         info_row.addWidget(self.right_info)
         lay.addLayout(info_row)
-
-        if allow_cancel:
-            btn_row = QHBoxLayout()
-            btn_row.addStretch(1)
-            self.cancel_btn = QPushButton("Cancel")
-            self.cancel_btn.clicked.connect(self.reject)
-            btn_row.addWidget(self.cancel_btn)
-            lay.addLayout(btn_row)
-        else:
-            self.cancel_btn = None
-
         self.elapsed.start()
         self.timer.start()
 
@@ -577,6 +567,17 @@ class ProcessingDialog(QDialog):
         #cancelling blur
         self.cancelled = False
         self.allow_cancel = bool(allow_cancel)
+
+        if allow_cancel and show_cancel_button:
+            # create the button
+            btn_row = QHBoxLayout()
+            btn_row.addStretch(1)
+            self.cancel_btn = QPushButton("Cancel")
+            self.cancel_btn.clicked.connect(self.reject)
+            btn_row.addWidget(self.cancel_btn)
+            lay.addLayout(btn_row)
+        else:
+            self.cancel_btn = None
         
         
         
@@ -2145,16 +2146,63 @@ class EnhancedEditorPanel(QWidget):
         """Internal timer slot (controller usually drives playback)"""
         pass
 
-    def start_detect_progress(self):
-        self._dlg_detect = ProcessingDialog(self, "Processing", "Detecting gestures…", None, False)
+    #DETECTING GESTURE
+    def start_detect_progress(self, total_steps: int = 100):
+        # If a previous detect dialog exists (hidden/cancelled), delete it
+        old = getattr(self, "_dlg_detect", None)
+        if old is not None:
+            try:
+                old.hide()
+                old.close()
+                QTimer.singleShot(0, old.deleteLater)
+            except Exception:
+                pass
+            self._dlg_detect = None
+
+        # Fresh dialog for a fresh run
+        self._dlg_detect = ProcessingDialog(
+            self,
+            title="Detecting Gestures",
+            message="Analyzing video...",
+            total_steps=total_steps,
+            allow_cancel=True,          # ✖ sets cancelled=True and hides (non-destructive)
+        )
         self._dlg_detect.show()
         QApplication.processEvents()
 
-    def finish_detect_progress(self):
-        if hasattr(self, "_dlg_detect"):
-            self._dlg_detect.close()
-            del self._dlg_detect
 
+    def set_detect_progress(self, pct: int, label: str = None) -> bool:
+        """Safe: returns False if dialog missing/cancelled/destroyed."""
+        dlg = getattr(self, "_dlg_detect", None)
+        if not dlg or dlg.was_cancelled():
+            return False
+        try:
+            if label is not None:
+                dlg.set_progress(int(max(0, min(100, pct))), label=label)
+            else:
+                dlg.set_progress(int(max(0, min(100, pct))))
+            QApplication.processEvents()
+            return True
+        except RuntimeError:
+            # e.g., user closed window between checks
+            self._dlg_detect = None
+            return False
+
+    def finish_detect_progress(self, success: bool = True):
+        dlg = getattr(self, "_dlg_detect", None)
+        if not dlg:
+            return
+        try:
+            if not dlg.was_cancelled():
+                dlg.finish("Complete" if success else "Cancelled")
+            dlg.close()
+            QTimer.singleShot(0, dlg.deleteLater)
+        except Exception:
+            pass
+        self._dlg_detect = None
+
+        
+    #EXPORTING
     def start_export_progress(self):
         self._dlg_export = ProcessingDialog(self, "Exporting", "Writing video file…", 100, False)
         self._dlg_export.show()
@@ -2204,9 +2252,13 @@ class EnhancedEditorPanel(QWidget):
         if not dlg:
             return
         try:
+            # If user didn’t cancel, show a short “Complete/Failed” then close
             if not dlg.was_cancelled():
                 dlg.finish("Complete" if success else "Failed")
+            # Close immediately; the dialog hides itself on cancel.
             dlg.close()
+            # Ensure the widget is actually cleaned up soon, without blocking
+            QTimer.singleShot(0, dlg.deleteLater)
         except Exception:
             pass
         self._dlg_blur = None
