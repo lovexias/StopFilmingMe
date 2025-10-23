@@ -28,7 +28,7 @@ from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor, QPen, QBrush
 from view import KeyboardShortcutsDialog
 from view import EditorPanel, ProcessingDialog, ExportDialog
 from model import EditorCore
-
+import tempfile, shutil
 from utilities import (
     PersonTracker,
     detect_multiple_people_yolov8,
@@ -383,6 +383,11 @@ class MainWindow(QMainWindow):
         shortcuts_action = QAction("Keyboard Shortcuts", self)
         shortcuts_action.triggered.connect(self._show_shortcuts_reference)
         help_menu.addAction(shortcuts_action)
+        
+    #cancel blurring
+    def _cancelled(self) -> bool:
+        """True if the current ProcessingDialog was X-closed."""
+        return bool(getattr(self, "proc", None) and self.proc.was_cancelled())
 
     # ---------- Menus and Controller slots ----------
     def _check_memory(self):
@@ -466,10 +471,7 @@ class MainWindow(QMainWindow):
         self.repaint()
         QApplication.processEvents()
 
-
-
-   
-    # main.py — inside class MainWindow
+    
     def _toast(self, text: str, title: str = "StopFilming", ms: int = 1500):
         dlg = ProcessingDialog(self, title=title, message=text, total_steps=None)
         dlg.setWindowModality(Qt.NonModal)
@@ -484,9 +486,6 @@ class MainWindow(QMainWindow):
 
         dlg.show()
         QTimer.singleShot(ms, dlg.accept)
-
-
-
 
     def _on_save_project(self):
         if not self.core.video_path:
@@ -518,17 +517,25 @@ class MainWindow(QMainWindow):
         self.core.set_export_bitrate_mbps(int(cfg.get("bitrate_mbps", 12)))
         self.core.set_export_overrides(cfg.get("resolution", "Original"), cfg.get("fps", "Original"))
 
-        self.proc = ProcessingDialog(self, title="Exporting – StopFilming",
-                                     message="Exporting video…", total_steps=100)
+        self.proc = ProcessingDialog(
+            self,
+            title="Detecting Gestures",
+            message="Analyzing video...",
+            total_steps=100,
+            allow_cancel=True,          # ✖ cancels detection
+            show_cancel_button=False    # no visible Cancel button
+        )
         self.proc.setWindowModality(Qt.ApplicationModal)
         self.proc.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.proc.show()
         QApplication.processEvents()
 
+        
         self.export_thread = ExportWorker(self.core, out_path)
         self.export_thread.progress.connect(
             lambda pct: self.proc.set_progress(int(max(0, min(100, pct))), label=f"{int(pct)}%")
         )
+        
 
         def _done(ok, path):
             if getattr(self, "proc", None):
@@ -665,6 +672,7 @@ class MainWindow(QMainWindow):
         if not self.core.video_path:
             QMessageBox.information(self, "Detection", "No video loaded.")
             return
+            
 
         video_path = self.core.video_path
         cap = cv2.VideoCapture(video_path)
@@ -679,10 +687,11 @@ class MainWindow(QMainWindow):
         print(f"Video: {video_path}")
         print(f"Total Frames: {total_frames}, FPS: {fps:.2f}, Rotation: {rotation}°")
 
-        # Processing dialog
+        # Processing dialog TO CANCEL IT AS WELL
         self.proc = ProcessingDialog(self, title="Detecting Gestures", message="Analyzing video...", total_steps=100)
         self.proc.show()
         QApplication.processEvents()
+        #----------//
 
         person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
         discovered_people = []
@@ -696,6 +705,11 @@ class MainWindow(QMainWindow):
             ret, frame = cap.read()
             if not ret:
                 break
+
+            if self._cancelled():
+                self.proc.finish("Cancelled")
+                self.proc = None
+                return
 
             # Rotate if needed
             if rotation == 90:
@@ -753,8 +767,23 @@ class MainWindow(QMainWindow):
         area_thresh = 5000                          # constant minimum box size
         print(f"🔧 Using thresholds → sharpness<{sharp_thresh:.1f}, brightness<{bright_thresh:.1f}, area<{area_thresh}")
 
+        if self._cancelled():
+            if 'cap' in locals(): cap.release()
+            self.statusBar().showMessage("Detection cancelled")
+            self.proc.finish("Cancelled")
+            self.proc = None
+            return
+
         for gesture_type in gestures_to_check:
             print(f"\n🎯 Checking gesture type: {gesture_type}")
+
+            if self._cancelled():
+                if 'cap' in locals(): cap.release()
+                self.statusBar().showMessage("Detection cancelled")
+                self.proc.finish("Cancelled")
+                self.proc = None
+                return
+            
             for pid in discovered_people:
                 # Skip if already detected or face unclear
                 if gesture_found_for_person[pid]:
@@ -770,6 +799,13 @@ class MainWindow(QMainWindow):
 
                 for frame_num in range(0, total_frames, ANALYSIS_FRAME_SKIP):
                     # Early skip if already found
+                    if self._cancelled():
+                        if 'cap' in locals(): cap.release()
+                        self.statusBar().showMessage("Detection cancelled")
+                        self.proc.finish("Cancelled")
+                        self.proc = None
+                        return
+
                     if gesture_found_for_person[pid]:
                         break
 
@@ -923,6 +959,15 @@ class MainWindow(QMainWindow):
         print(f"Selected IDs this pass: {sorted(selected_ids)}")
         print(f"New IDs to blur this pass: {sorted(new_ids)}")
 
+        #BLUR- CANCEL-----------//
+        # --- Staging so we can roll back on cancel ---
+        import tempfile, shutil
+        cancelled = False
+        staged_cache = {}  # frame_idx -> blurred frame (RAM)
+        run_dir = os.path.join(self.core.blur_cache_dir if hasattr(self.core, "blur_cache_dir") else tempfile.mkdtemp(prefix="blur_cache_"),
+                            f"run_{int(time.time())}")
+        os.makedirs(run_dir, exist_ok=True)
+
 
 
         def _iou(a, b):
@@ -956,9 +1001,16 @@ class MainWindow(QMainWindow):
         # Reuse or create disk cache
         # NEW (cache lives on the core so export can see it)
         if not hasattr(self.core, "blur_cache_dir"):
-            import tempfile
             self.core.blur_cache_dir = tempfile.mkdtemp(prefix="blur_cache_")
         cache_dir = self.core.blur_cache_dir
+
+
+        # --- staging so we can cancel/rollback cleanly ---
+        cancelled = False
+        staged_cache = {}  # frame_idx -> blurred frame (RAM)
+        run_dir = os.path.join(cache_dir, f"run_{int(time.time())}")
+        os.makedirs(run_dir, exist_ok=True)
+
 
         print(f"📁 Using cache directory: {cache_dir}")
 
@@ -1059,14 +1111,20 @@ class MainWindow(QMainWindow):
 
 
             # Save blurred frame to cache
-            frame_path = os.path.join(cache_dir, f"{frame_idx:06d}.jpg")
-            cv2.imwrite(frame_path, blurred_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # --- stage write (do NOT touch the real cache yet) ---
+            frame_path_stage = os.path.join(run_dir, f"{frame_idx:06d}.jpg")
+            cv2.imwrite(frame_path_stage, blurred_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            staged_cache[frame_idx] = blurred_frame
 
-            self.core.blurred_cache[frame_idx] = blurred_frame
-            self.core.blurred_frames.add(frame_idx)
-            if len(self.core.blurred_cache) > 20:
-                oldest_key = min(self.core.blurred_cache.keys())
-                del self.core.blurred_cache[oldest_key]
+            # progress
+            self.editor_panel.set_blur_progress(int((frame_idx / total_frames) * 100))
+
+            # cancel?
+            dlg = getattr(self.editor_panel, "_dlg_blur", None)
+            if dlg is not None and dlg.was_cancelled():
+                cancelled = True
+                break
+
 
             # Progress feedback
             if frame_idx % 50 == 0:
@@ -1085,6 +1143,38 @@ class MainWindow(QMainWindow):
 
         cap.release()
         gc.collect()
+
+        if cancelled:
+            # rollback to pre-click state
+            self.persistent_blur_ids = set(prev_ids)
+            try:
+                shutil.rmtree(run_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self.editor_panel.finish_blur_progress(False)
+            self.statusBar().showMessage("Blurring cancelled")
+            self._toast("Blur cancelled. No changes applied.", title="Blur – StopFilming")
+            return
+        else:
+            # commit: move staged files into the real cache, then merge in-memory
+            for name in os.listdir(run_dir):
+                src = os.path.join(run_dir, name)
+                dst = os.path.join(cache_dir, name)
+                try:
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    os.replace(src, dst)
+                except Exception:
+                    pass
+            try:
+                os.rmdir(run_dir)
+            except Exception:
+                pass
+
+            for idx, img in staged_cache.items():
+                self.core.blurred_cache[idx] = img
+                self.core.blurred_frames.add(idx)
+
 
         # --- UI updates (multi-select safe) ---
         print(f"\n🎉 COMPLETE! Persistent blur IDs now: {sorted(self.persistent_blur_ids)}")

@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QComboBox, QFileDialog, QRadioButton, QButtonGroup, QSpinBox
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtWidgets import QMessageBox
 
 # Premiere Pro Style Colors - Professional Dark Theme
 APP_BG = "#1e1e1e"         # Main background (darker)
@@ -450,6 +451,12 @@ class ProcessingDialog(QDialog):
         self.setMaximumWidth(500)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
+
+        # x gesture - stops what
+        self.allow_cancel = bool(allow_cancel)
+        self.cancelled = False
+        self.setAttribute(Qt.WA_DeleteOnClose, not self.allow_cancel) #cancel gesture
+
         # Premiere Pro style progress dialog
         self.setStyleSheet(f"""
             QDialog {{
@@ -565,6 +572,39 @@ class ProcessingDialog(QDialog):
         self.start_time = time.time()
         self.last_progress = 0
         self.last_time = self.start_time
+
+        
+        #cancelling blur
+        self.cancelled = False
+        self.allow_cancel = bool(allow_cancel)
+        
+        
+        
+        #----------------END----------------------#
+    
+    #BLURRING CANCELLATION---------------///
+    def was_cancelled(self) -> bool:
+        return self.cancelled
+
+    def reject(self):
+        # ESC or button (if any) -> behave like ✖
+        if self.allow_cancel:
+            self.cancelled = True
+            self.hide()
+            return
+        return super().reject()
+
+    def closeEvent(self, e):
+        # ✖ should cancel, but don't delete while work is running
+        if self.allow_cancel:
+            self.cancelled = True
+            e.ignore()
+            self.hide()
+            return
+        return super().closeEvent(e)
+    #-----------------------////
+
+
 
     # Public API methods remain the same...
     def set_message(self, text: str):
@@ -2105,11 +2145,6 @@ class EnhancedEditorPanel(QWidget):
         """Internal timer slot (controller usually drives playback)"""
         pass
 
-    # ---- Progress Dialogs ----
-
-    
-
-
     def start_detect_progress(self):
         self._dlg_detect = ProcessingDialog(self, "Processing", "Detecting gestures…", None, False)
         self._dlg_detect.show()
@@ -2145,33 +2180,41 @@ class EnhancedEditorPanel(QWidget):
             ))
 
     def start_blur_progress(self):
+        # allow_cancel=True so ✖ becomes "cancel"
         self._dlg_blur = ProcessingDialog(
-            parent=self,
-            title="Processing",
-            message="Blurring person in video…",
-            total_steps=100,
-            allow_cancel=False
+            parent=self, title="Processing", message="Blurring person in video…",
+            total_steps=100, allow_cancel=True
         )
         self._dlg_blur.show()
         QApplication.processEvents()
 
     def set_blur_progress(self, pct: int):
-        if hasattr(self, "_dlg_blur") and self._dlg_blur:
-            self._dlg_blur.set_progress(int(max(0, min(100, pct))))
+        dlg = getattr(self, "_dlg_blur", None)
+        if not dlg or dlg.was_cancelled():
+            return
+        try:
+            dlg.set_progress(int(max(0, min(100, pct))))
             QApplication.processEvents()
+        except RuntimeError:
+            # dialog got destroyed between checks
+            self._dlg_blur = None
 
     def finish_blur_progress(self, success: bool = True):
-        if hasattr(self, "_dlg_blur") and self._dlg_blur:
-            try:
-                self._dlg_blur.finish("Complete" if success else "Failed")
-            finally:
-                self._dlg_blur = None
+        dlg = getattr(self, "_dlg_blur", None)
+        if not dlg:
+            return
+        try:
+            if not dlg.was_cancelled():
+                dlg.finish("Complete" if success else "Failed")
+            dlg.close()
+        except Exception:
+            pass
+        self._dlg_blur = None
 
     # ---- Audio Methods (keeping existing functionality) ----
     def prepare_audio_for(self, path: str):
         """Try to load audio directly from the video. If DirectShow rejects it, extract a WAV with ffmpeg and load that instead."""
-        from PyQt5.QtCore import QUrl
-        import os, subprocess, tempfile, shutil
+        
 
         # 1) first try direct
         self.set_media_source(path)
@@ -2868,8 +2911,6 @@ class AboutDialog(QDialog):
         link.setOpenExternalLinks(False)
         link.linkActivated.connect(lambda _: open_docs_html_or_web("https://example.com/stopfilming/docs"))
 
-        
-        # ... keep metadata and link label ...
         root.addStretch(1)
         line2 = QFrame(); line2.setObjectName("line"); line2.setFixedHeight(1)
         root.addWidget(line2)
@@ -2892,7 +2933,6 @@ class AboutDialog(QDialog):
             dlg = ReadmeDialog(self)
             dlg.exec_()
         except Exception as e:
-            from PyQt5.QtWidgets import QMessageBox
             QMessageBox.information(self, "Documentation", f"Could not open README:\n{e}")
 
 
@@ -2942,7 +2982,6 @@ class ReadmeDialog(QDialog):
         self._load_readme()
 
     def _readme_path(self):
-        import os, sys
         base = os.path.dirname(os.path.abspath(sys.argv[0]))
         for name in ("README.md", "Readme.md", "readme.md"):
             p = os.path.join(base, name)
