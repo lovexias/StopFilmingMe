@@ -16,7 +16,7 @@ import time
 import cv2
 from ultralytics import YOLO
 from PyQt5.QtCore import QUrl
-import webbrowser
+
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAction, QFileDialog, QMessageBox, QDialog,
@@ -34,8 +34,10 @@ from utilities import (
     detect_multiple_people_yolov8,
     detect_gesture_in_person_box,
     blur_faces_of_person,   # <-- add this
+    face_bbox_in_person
 )
 
+from PyQt5.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QRadioButton, QButtonGroup, QLabel, QSlider
 
 # Add these constants
 DISCOVERY_FRAME_SKIP = 70
@@ -43,21 +45,17 @@ ANALYSIS_FRAME_SKIP = 35
 YOLO_DETECTION_INTERVAL = 10
 GESTURE_DURATION = 3  # seconds
 
-# Initialize ORB and matcher for feature tracking
-orb = cv2.ORB_create(nfeatures=500)
-bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-# Load YOLO segmentation model
-yolo_model = YOLO('yolov8m-seg.pt')
-
 # ---------------- Workers ----------------
 class BlurPersonWorker(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal()
 
-    def __init__(self, core, sel_pid):
+    def __init__(self, core, sel_pid, blur_type, blur_strength):
         super().__init__()
         self.core = core
         self.sel_pid = sel_pid
+        self.blur_type = blur_type
+        self.blur_strength = blur_strength
 
     def run(self):
         import cv2
@@ -127,7 +125,17 @@ class BlurPersonWorker(QThread):
             if blur_bbox is not None:
                 # AFTER
                 base = self.core.blurred_cache.get(frame_idx, frame)
-                out  = blur_faces_of_person(base, blur_bbox)
+                # Detect face on the clean frame, not the possibly-blurred base
+                clean_for_face = frame
+                face_bb = face_bbox_in_person(clean_for_face, blur_bbox)
+
+                out = blur_faces_of_person(
+                    base, face_bb,
+                    blur_type=self.blur_type,
+                    strength=self.blur_strength
+                )
+
+
                 self.core.blurred_cache[frame_idx] = out
                 self.core.blurred_frames.add(frame_idx)
 
@@ -360,6 +368,14 @@ class MainWindow(QMainWindow):
         self.warn_mem_action.setChecked(not self._mem_warn_suppressed)
         self.warn_mem_action.toggled.connect(self._toggle_memory_warnings)
         view_menu.addAction(self.warn_mem_action)
+
+        # Blur settings (defaults)
+        self.blur_type = "gaussian"
+        self.blur_strength = 50
+        self._wire_blur_controls_from_panel()
+
+
+
 # --------------------------------------------------------------------
 
 
@@ -392,12 +408,72 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
 
+
+        self.face_ref_for = {}     # pid -> last stable face bbox
+        self.face_miss_for = {}    # pid -> consecutive misses
+
+
         
 
         shortcuts_action = QAction("Keyboard Shortcuts", self)
         shortcuts_action.triggered.connect(self._show_shortcuts_reference)
         help_menu.addAction(shortcuts_action)
-        
+
+
+    #for ability to chose the type of blur----------------------------------
+    
+    
+    def _on_blur_type_changed(self, t: str):
+        self.blur_type = t
+        # also reflect the change in the panel radios if needed
+        p = getattr(self, "editor_panel", None)
+        if p:
+            if t == "gaussian" and hasattr(p, "rb_gauss"): p.rb_gauss.setChecked(True)
+            elif t == "pixelate" and hasattr(p, "rb_pixel"): p.rb_pixel.setChecked(True)
+            elif t == "solid" and hasattr(p, "rb_solid"): p.rb_solid.setChecked(True)
+
+    def _on_blur_strength_changed(self, v: int):
+        self.blur_strength = int(v)
+        # update the pill on the existing right panel
+        p = getattr(self, "editor_panel", None)
+        if p and hasattr(p, "lbl_strength_pct"):
+            p.lbl_strength_pct.setText(f"{int(v)}%")
+
+    #-----------//
+
+    def _wire_blur_controls_from_panel(self):
+        p = self.editor_panel
+
+        # guard if the panel changed / not built yet
+        for attr in ("rb_gauss", "rb_pixel", "rb_solid", "blur_strength", "lbl_strength_pct"):
+            if not hasattr(p, attr):
+                print("Blur controls not found on panel; skipping wiring.")
+                return
+
+        # initial sync from MainWindow -> UI
+        if self.blur_type == "gaussian":
+            p.rb_gauss.setChecked(True)
+        elif self.blur_type == "pixelate":
+            p.rb_pixel.setChecked(True)
+        else:
+            p.rb_solid.setChecked(True)
+
+        p.blur_strength.setRange(0, 100)
+        p.blur_strength.setValue(int(self.blur_strength))
+        if hasattr(p, "lbl_strength_pct"):
+            p.lbl_strength_pct.setText(f"{int(self.blur_strength)}%")
+
+        # connect UI -> MainWindow state
+        p.rb_gauss.toggled.connect(lambda c: c and self._on_blur_type_changed("gaussian"))
+        p.rb_pixel.toggled.connect(lambda c: c and self._on_blur_type_changed("pixelate"))
+        p.rb_solid.toggled.connect(lambda c: c and self._on_blur_type_changed("solid"))
+
+        # reuse your existing handler so everything stays in one place
+        p.blur_strength.valueChanged.connect(self._on_blur_strength_changed)
+
+
+     #///----------------------------------
+
     
     #supress memory issues
     def _toggle_memory_warnings(self, enabled: bool):
@@ -495,6 +571,8 @@ class MainWindow(QMainWindow):
 
         thumbs = self.core.generate_thumbnails(num_thumbs=16)
         self.editor_panel.add_thumbnails(thumbs)
+        self._wire_blur_controls_from_panel() #wiring blurring
+
 
         self.setWindowTitle(f"StopFilming — Editing: {vid_path}")
         screen = QApplication.primaryScreen()
@@ -604,9 +682,13 @@ class MainWindow(QMainWindow):
 
     def _on_clear_blurs(self):
         self.core.blurred_frames.clear()
-       #self.core.blurred_cache.clear()
+        # self.core.blurred_cache.clear()  # keep commented if you want preview to persist
         self.editor_panel.clear_markers()
         self.editor_panel.blur_button.setEnabled(False)
+        # also reset face stabilizer memory
+        self.face_ref_for.clear()
+        self.face_miss_for.clear()
+
 
     def _on_play_toggled(self, play: bool):
         if not self.core or not self.core.video_path:
@@ -691,9 +773,9 @@ class MainWindow(QMainWindow):
 
         frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
         display_frame = self._apply_rotation(frame)
-
-        # --- Use blurred frame cache if available ---
+            
         # NEW
+        # --- Use blurred frame cache if available ---
         if hasattr(self.core, "blur_cache_dir") and os.path.exists(self.core.blur_cache_dir):
             frame_path = os.path.join(self.core.blur_cache_dir, f"{frame_idx:06d}.jpg")
             if frame_idx in self.core.blurred_cache:
@@ -709,8 +791,23 @@ class MainWindow(QMainWindow):
                 if abs(k - frame_idx) > 15:
                     del self.core.blurred_cache[k]
 
+        # OPTIONAL live preview — apply BEFORE displaying
+        if hasattr(self, "persistent_blur_ids") and getattr(self, "persistent_blur_ids", None) and hasattr(self, "_preview_people"):
+            for pid, pdata in self._preview_people.items():
+                if pid in self.persistent_blur_ids and "bbox" in pdata:
+                    person_bb = tuple(map(int, pdata["bbox"]))
+                    face_bb = face_bbox_in_person(display_frame, person_bb)
+                    display_frame = blur_faces_of_person(
+                        display_frame, face_bb,
+                        blur_type=self.blur_type,
+                        strength=self.blur_strength
+                    )
+
+
+        # Now display
         self.editor_panel.display_frame(display_frame, frame_idx)
         self.editor_panel.current_frame_idx = frame_idx
+
 
 
 
@@ -1003,6 +1100,24 @@ class MainWindow(QMainWindow):
         print(f"Selected IDs this pass: {sorted(selected_ids)}")
         print(f"New IDs to blur this pass: {sorted(new_ids)}")
 
+
+        # --- Decide whether to re-render from clean frames or build on cached frames ---
+        # Re-render if: (1) blur type/strength changed since last run, or (2) you're re-blurring any already-blurred IDs
+        last_profile = getattr(self, "_last_blur_profile", None)
+        current_profile = (self.blur_type, int(self.blur_strength))
+
+        changed_profile = (last_profile is not None) and (current_profile != last_profile)
+        has_existing_overlap = len(set(selected_ids) & prev_ids) > 0 # any already-blurred IDs selected/persistent
+
+        re_render_all = changed_profile or has_existing_overlap
+
+        # We will blur either all persistent IDs (clean re-render) or only the new IDs (incremental)
+        ids_to_apply = set(self.persistent_blur_ids) if re_render_all else set(new_ids)
+
+        print(f"Re-render all from clean frame? {re_render_all} (profile_changed={changed_profile}, overlap={has_existing_overlap})")
+        print(f"IDs to apply this pass: {sorted(ids_to_apply)}")
+
+
         #BLUR- CANCEL-----------//
         # --- Staging so we can roll back on cancel ---
         import tempfile, shutil
@@ -1097,6 +1212,32 @@ class MainWindow(QMainWindow):
                 if i > best_iou:
                     best_pid, best_bb, best_iou = pid, bb, i
             return best_pid, best_bb, best_iou
+        
+        # --- face-box helpers (local) ---
+        def bbox_iou(a, b):
+            # just delegate to the IoU helper you already defined above
+            return _iou(a, b)
+
+        def expand_bbox(bb, W, H, pad=0.10):
+            x1, y1, x2, y2 = map(int, bb)
+            w = x2 - x1
+            h = y2 - y1
+            dx = int(w * pad)
+            dy = int(h * pad)
+            nx1 = max(0, x1 - dx)
+            ny1 = max(0, y1 - dy)
+            nx2 = min(W, x2 + dx)
+            ny2 = min(H, y2 + dy)
+            if nx2 <= nx1 + 1: nx2 = min(W, nx1 + 2)
+            if ny2 <= ny1 + 1: ny2 = min(H, ny1 + 2)
+            return (nx1, ny1, nx2, ny2)
+
+        def lerp_boxes(a, b, alpha=0.3):
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            def L(u, v): return int(round((1 - alpha) * u + alpha * v))
+            return (L(ax1, bx1), L(ay1, by1), L(ax2, bx2), L(ay2, by2))
+
 
         while True:
             ret, frame = cap.read()
@@ -1123,16 +1264,22 @@ class MainWindow(QMainWindow):
                 current_people = last_tracked_people.copy()
 
             # Use previously blurred frame as the base if it exists, so older blurs persist.
+            # Choose base frame depending on render mode
             frame_path = os.path.join(cache_dir, f"{frame_idx:06d}.jpg")
-            if os.path.exists(frame_path):
-                base = cv2.imread(frame_path)     # already has all *previous* people
-            else:
+            if re_render_all:
+                # Always start clean; we will re-apply blur for all persistent IDs
                 base = frame.copy()
+            else:
+                # Incremental: reuse cached base if available, else clean
+                if os.path.exists(frame_path):
+                    base = cv2.imread(frame_path)
+                else:
+                    base = frame.copy()
 
             blurred_frame = base
 
            # Blur only the NEW people for this pass; old ones are already in 'base'
-            for pid in list(new_ids):
+            for pid in list(ids_to_apply):
                 ref_bb = self.ref_bbox_for.get(pid, (0,0,0,0))
                 match_pid, match_bb, match_iou = _best_match_bbox(ref_bb, current_people)
 
@@ -1150,8 +1297,46 @@ class MainWindow(QMainWindow):
                     match_bb = best
 
                 if match_bb is not None:
-                    blurred_frame = blur_faces_of_person(blurred_frame, match_bb)
+                # detect face on a clean frame (not already blurred),
+                    # 'frame' is the raw current frame right above
+                    face_bb = face_bbox_in_person(frame, match_bb)
+
+                    # --- STABILIZE THE FACE BOX PER PERSON ---
+                    H, W = frame.shape[:2]
+                    prev = self.face_ref_for.get(pid)
+
+                    if prev is not None:
+                        if bbox_iou(prev, face_bb) < 0.30:
+                            # treat as a miss; only switch after a few consistent misses
+                            misses = self.face_miss_for.get(pid, 0) + 1
+                            self.face_miss_for[pid] = misses
+                            if misses < 3:
+                                face_bb = prev
+                            else:
+                                self.face_ref_for[pid] = face_bb
+                                self.face_miss_for[pid] = 0
+                        else:
+                            # optional smoothing to reduce jitter
+                            # face_bb = lerp_boxes(prev, face_bb, 0.3)
+                            self.face_ref_for[pid] = face_bb
+                            self.face_miss_for[pid] = 0
+                    else:
+                        self.face_ref_for[pid] = face_bb
+                        self.face_miss_for[pid] = 0
+
+                    # pad the box slightly to hide tiny shifts
+                    face_bb = expand_bbox(face_bb, W, H, pad=0.10)
+
+                    # finally blur
+                    blurred_frame = blur_faces_of_person(
+                        blurred_frame, face_bb,
+                        blur_type=self.blur_type,
+                        strength=self.blur_strength
+                    )
+
+                    # keep updating the person (body) ref bbox too
                     self.ref_bbox_for[pid] = match_bb
+
 
 
             # Save blurred frame to cache
@@ -1248,6 +1433,9 @@ class MainWindow(QMainWindow):
         print(f"DEBUG: blurred_frames has {len(self.core.blurred_frames)} frames")
         print(f"DEBUG: blurred_cache has {len(self.core.blurred_cache)} frames")
         print(f"DEBUG: Sample frame indices: {list(self.core.blurred_frames)[:10]}")
+
+        self._last_blur_profile = (self.blur_type, int(self.blur_strength))
+
 
 
     def _on_gesture_detection_finished(self, people_with_gestures):
@@ -1408,12 +1596,8 @@ class MainWindow(QMainWindow):
 
 
     def _check_for_updates(self):
-        QMessageBox.information(self, "Check for Updates", "No updates available.")
+        QMessageBox.information(self, "Check for Updates", "No updates available.") 
 
-
-    #rmeove this is for preference if not used
-    #def _toggle_appearance(self):
-       # QMessageBox.information(self, "Appearance", "Toggle light/dark (not implemented).")
 
     def _show_shortcuts_reference(self):
         dlg = KeyboardShortcutsDialog(self)

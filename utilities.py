@@ -10,8 +10,10 @@ import json
 import numpy as np
 import mediapipe as mp
 from ultralytics import YOLO
-from collections import deque
 import os
+import torch
+
+
 
 # OPTIMIZATION: Use segmentation model for better person boundaries (Kyle's improvement)
 # but with caching to avoid reloading
@@ -26,8 +28,45 @@ orb = cv2.ORB_create(nfeatures=500)
 bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
 # Debug and tracking globals
-DEBUG_TRACKING = True
-next_person_id = 1
+#DEBUG_TRACKING = True
+#next_person_id = 1
+
+
+def _select_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    # Apple Silicon (optional)
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+DEVICE = _select_device()
+USE_HALF = (DEVICE == "cuda")  # half precision only on CUDA
+
+# Load once, move to device, and fuse layers
+yolo_model = YOLO("yolov8m-seg.pt")
+try:
+    yolo_model.to(DEVICE)
+    yolo_model.fuse()  # small speed bump
+    # For Ultralytics >=8.2 this is enough; if you want hard FP16:
+    if USE_HALF and hasattr(yolo_model.model, "half"):
+        yolo_model.model.half()
+except Exception:
+    pass
+
+# Optional — helps cuDNN pick optimal algos on variable sizes
+try:
+    torch.backends.cudnn.benchmark = True
+except Exception:
+    pass
+
+try:
+    cv2.setNumThreads(1)
+except Exception:
+    pass
+
+
+
 
 # ──────────────────────────────────────────────────────────────
 # ADVANCED PERSON TRACKING SYSTEM (From Kyle) - OPTIMIZED ok
@@ -253,51 +292,53 @@ class PersonTracker:
 # ──────────────────────────────────────────────────────────────
 
 def detect_multiple_people_yolov8(frame, conf_threshold=0.15):
-    """
-    OPTIMIZED: Detects multiple people using YOLOv8 segmentation model with speed optimizations.
-    Returns a list of (bbox, mask) tuples for better person tracking.
-    """
-    # OPTIMIZATION: Resize frame for faster detection (from original utilities.py)
     orig_h, orig_w = frame.shape[:2]
-    if orig_w > 1280:  # Only resize if larger than 720p
+    if orig_w > 1280:
         scale = 1280 / orig_w
         new_w, new_h = int(orig_w * scale), int(orig_h * scale)
         frame_small = cv2.resize(frame, (new_w, new_h))
     else:
         frame_small = frame
         scale = 1.0
-    
-    # SPEED: Single model inference
-    results = yolo_model(frame_small)[0]
-    detections = []
-    
-    if hasattr(results, "boxes") and results.boxes is not None:
-        boxes = results.boxes
-        masks = getattr(results, 'masks', None)
-        
-        for i, box in enumerate(boxes):
-            # Check if detection is a person (class 0 in COCO dataset)
-            if int(box.cls) == 0 and float(box.conf) >= conf_threshold:
-                # Get bounding box coordinates and scale back
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                if scale != 1.0:
-                    x1, y1, x2, y2 = x1/scale, y1/scale, x2/scale, y2/scale
-                
-                bbox = (int(x1), int(y1), int(x2), int(y2))
-                
-                # Get corresponding mask if available
-                mask = None
-                if masks is not None and i < len(masks.data):
-                    mask = masks.data[i].cpu().numpy()
-                    # OPTIMIZATION: Only resize mask if frame was resized
-                    if scale != 1.0:
-                        mask = cv2.resize(mask, (orig_w, orig_h))
-                    elif mask.shape != (orig_h, orig_w):
-                        mask = cv2.resize(mask, (orig_w, orig_h))
-                
-                detections.append((bbox, mask))
 
-    return detections
+    res = yolo_model.predict(
+        source=frame_small,
+        device=DEVICE,
+        half=USE_HALF,
+        verbose=False
+    )[0]
+
+    dets = []
+
+    if res.boxes is not None and len(res.boxes) > 0:
+        xyxy = res.boxes.xyxy.cpu().numpy()
+        cls   = res.boxes.cls.cpu().numpy().astype(int)
+        conf  = res.boxes.conf.cpu().numpy()
+        masks = getattr(res, "masks", None)
+
+        for i in range(xyxy.shape[0]):
+            if cls[i] != 0 or conf[i] < conf_threshold:
+                continue
+
+            x1, y1, x2, y2 = xyxy[i]
+            if scale != 1.0:
+                x1, y1, x2, y2 = x1/scale, y1/scale, x2/scale, y2/scale
+            bbox = (int(x1), int(y1), int(x2), int(y2))
+
+            mask = None
+            if masks is not None and masks.data is not None:
+                m = masks.data[i].cpu().numpy()        # HxW float mask
+                # keep it binary-ish and resize correctly
+                m = (m > 0.5).astype(np.uint8)
+                if scale != 1.0 or m.shape[:2] != (orig_h, orig_w):
+                    mask = cv2.resize(m, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+                else:
+                    mask = m
+
+            dets.append((bbox, mask))
+
+    return dets
+
 
 # OPTIMIZATION: Keep the original optimized function as fallback
 def detect_multiple_people_yolov8_optimized(frame, conf_threshold=0.15):
@@ -314,7 +355,13 @@ def detect_multiple_people_yolov8_optimized(frame, conf_threshold=0.15):
         scale = 1.0
     
     # Run YOLO on smaller frame
-    results = yolo_model(frame_small)[0]
+    results = yolo_model.predict(
+        source=frame_small,
+        device=DEVICE,
+        half=USE_HALF,
+        verbose=False
+    )[0]
+
     detections = []
     
     if hasattr(results, "boxes") and results.boxes is not None:
@@ -525,54 +572,88 @@ class HandOverFaceDetector:
         return hand_over_face_frames
 
 # OPTIMIZED: Face blurring function
-def blur_faces_of_person(frame, bbox):
-    """OPTIMIZED: Blur faces within the specified bounding box region."""
-    if bbox is None:
-        return frame
-        
-    try:
-        x1, y1, x2, y2 = bbox
-    except (TypeError, ValueError):
-        return frame
-        
-    h, w, _ = frame.shape
-    
-    # SPEED: Ensure coordinates are within frame bounds
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(w, x2), min(h, y2)
-    
+
+
+def blur_faces_of_person(img, bbox, blur_type="gaussian", strength=50, solid_color=(64, 64, 64)):
+    # bbox = (x1,y1,x2,y2)
+    x1, y1, x2, y2 = map(int, bbox)
+    h, w = img.shape[:2]
+    x1 = np.clip(x1, 0, w-1); x2 = np.clip(x2, 1, w); 
+    y1 = np.clip(y1, 0, h-1); y2 = np.clip(y2, 1, h)
     if x2 <= x1 or y2 <= y1:
-        return frame
-    
-    # Extract person region
-    person_crop = frame[y1:y2, x1:x2]
-    if person_crop.size == 0:
-        return frame
+        return img
 
-    # OPTIMIZATION: Use global MediaPipe face detector
-    person_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
-    face_result = mp_face_global.process(person_rgb)
+    roi = img[y1:y2, x1:x2]
+    out = img
 
-    if face_result.detections:
-        for detection in face_result.detections:
-            box = detection.location_data.relative_bounding_box
-            fx = int(box.xmin * (x2 - x1)) + x1
-            fy = int(box.ymin * (y2 - y1)) + y1
-            fw = int(box.width * (x2 - x1))
-            fh = int(box.height * (y2 - y1))
+    s = int(np.clip(strength, 0, 100))
+    if s <= 0:
+        return img
 
-            # Ensure coordinates are within frame bounds
-            fx, fy = max(0, fx), max(0, fy)
-            fw = min(fw, w - fx)
-            fh = min(fh, h - fy)
+    if blur_type.lower() in ("solid", "rectangle", "box"):
+        # Map strength 0..100 -> alpha 0..1 (0=transparent, 1=opaque)
+        alpha = s / 100.0
+        # Optional: give more finesse at low values
+        # alpha = (s/100.0) ** 1.2     # comment the line above and use this if you want even lighter lows
+        overlay = np.full_like(roi, solid_color, dtype=roi.dtype)
+        blended = cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0.0)
+        out[y1:y2, x1:x2] = blended
 
-            if fw > 0 and fh > 0:
-                face_roi = frame[fy:fy+fh, fx:fx+fw]
-                # SPEED: Use smaller blur kernel for faster processing
-                blurred_face = cv2.GaussianBlur(face_roi, (51, 51), 0)
-                frame[fy:fy+fh, fx:fx+fw] = blurred_face
+    elif blur_type.lower() in ("gaussian", "gauss"):
+        # Kernel size 3..71, odd numbers; sigma auto
+        k = int(np.interp(s, [0, 100], [3, 71]))
+        k = k + (1 - k % 2)  # make odd
+        blurred = cv2.GaussianBlur(roi, (k, k), 0)
+        out[y1:y2, x1:x2] = blurred
 
-    return frame
+    elif blur_type.lower() in ("pixelate", "pixel", "mosaic"):
+        # Downscale factor 2..50 (higher => chunkier pixels)
+        factor = max(2, int(np.interp(s, [0, 100], [2, 50])))
+        sh, sw = roi.shape[:2]
+        down = cv2.resize(roi, (max(1, sw // factor), max(1, sh // factor)), interpolation=cv2.INTER_LINEAR)
+        up   = cv2.resize(down, (sw, sh), interpolation=cv2.INTER_NEAREST)
+        out[y1:y2, x1:x2] = up
+
+    else:
+        # default to gaussian if unknown
+        k = 9
+        out[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (k, k), 0)
+
+    return out
+
+def face_bbox_in_person(frame, person_bbox):
+    """Return a face bbox inside a person bbox; fallback to 'head' region."""
+    x1, y1, x2, y2 = map(int, person_bbox)
+    h, w = frame.shape[:2]
+    x1 = max(0, min(x1, w-1)); x2 = max(x1+1, min(x2, w))
+    y1 = max(0, min(y1, h-1)); y2 = max(y1+1, min(y2, h))
+
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return person_bbox
+
+    # MediaPipe expects RGB
+    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+    res = mp_face_global.process(crop_rgb)
+
+    if res and res.detections:
+        b = res.detections[0].location_data.relative_bounding_box
+        fx1 = x1 + int(b.xmin * (x2 - x1))
+        fy1 = y1 + int(b.ymin * (y2 - y1))
+        fw  = int(b.width  * (x2 - x1))
+        fh  = int(b.height * (y2 - y1))
+        fx2 = fx1 + fw
+        fy2 = fy1 + fh
+        # clamp
+        fx1 = max(0, min(fx1, w-1)); fx2 = max(fx1+1, min(fx2, w))
+        fy1 = max(0, min(fy1, h-1)); fy2 = max(fy1+1, min(fy2, h))
+        return (fx1, fy1, fx2, fy2)
+
+    # Fallback: top ~45% of the person box (a “head” heuristic)
+    head_h = max(8, int(0.45 * (y2 - y1)))
+    return (x1, y1, x2, min(y2, y1 + head_h))
+
+
 
 def detect_and_blur_multiple_people(frame, target_landmarks_list=None, conf_threshold=0.5, frame_count=0):
     """OPTIMIZED: Detect and blur multiple people using global solutions."""
@@ -844,156 +925,21 @@ def match_orb_features(desc1, desc2, match_threshold=15):
     good_matches = [m for m in matches if m.distance < 60]
     return len(good_matches) >= match_threshold
 
-# --------- FILE 2 CONTENT (Original) ---------
+def bbox_iou(a, b):
+    ax1, ay1, ax2, ay2 = a; bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0: return 0.0
+    area_a = (ax2-ax1)*(ay2-ay1); area_b = (bx2-bx1)*(by2-by1)
+    return inter / float(area_a + area_b - inter + 1e-6)
 
-import cv2
-import subprocess
-import json
-import numpy as np
-import mediapipe as mp
-from ultralytics import YOLO
-from collections import deque
-import os
+def expand_bbox(bb, w, h, pad=0.08):
+    x1,y1,x2,y2 = bb
+    bw, bh = x2-x1, y2-y1
+    px, py = int(bw*pad), int(bh*pad)
+    nx1 = max(0, x1 - px); ny1 = max(0, y1 - py)
+    nx2 = min(w, x2 + px); ny2 = min(h, y2 + py)
+    return (nx1, ny1, nx2, ny2)
 
-# Initialize YOLOv8 segmentation model globally for pixel-level person detection
-yolo_model = YOLO('yolov8m-seg.pt')  # Use segmentation model for better person boundaries
-
-# ──────────────────────────────────────────────────────────────
-# ADDITION: Initialize MediaPipe solutions globally for reuse
-mp_face_global = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.7)
-mp_pose_global = mp.solutions.pose.Pose()
-
-# ──────────────────────────────────────────────────────────────
-# ADVANCED PERSON TRACKING SYSTEM WITH ORB FEATURES
-class PersonTracker:
-    def __init__(self, max_disappeared=15, feature_threshold=0.3, motion_threshold=150):
-        self.next_id = 0
-        self.tracked_people = {}  # id -> PersonTrackingData
-        self.max_disappeared = max_disappeared
-        self.feature_threshold = feature_threshold
-        self.motion_threshold = motion_threshold
-        
-        # Initialize feature extractors
-        self.orb = cv2.ORB_create(nfeatures=500)
-        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        
-    def extract_person_features(self, frame, bbox, mask=None):
-        """Extract ORB features from person region, using mask if available."""
-        x1, y1, x2, y2 = bbox
-        # Ensure bbox is within frame bounds
-        h, w = frame.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        if x2 <= x1 or y2 <= y1:
-            return None, None
-        person_crop = frame[y1:y2, x1:x2]
-        if person_crop.size == 0:
-            return None, None
-        gray = cv2.cvtColor(person_crop, cv2.COLOR_BGR2GRAY) if len(person_crop.shape) == 3 else person_crop
-        mask_crop = None
-        if mask is not None:
-            mask_crop = mask[y1:y2, x1:x2]
-            if mask_crop.dtype != np.uint8:
-                mask_crop = (mask_crop * 255).astype(np.uint8)
-        keypoints, descriptors = self.orb.detectAndCompute(gray, mask_crop)
-        if descriptors is None or len(keypoints) < 10:
-            return None, None
-        return keypoints, descriptors
-    
-    def calculate_feature_similarity(self, desc1, desc2):
-        if desc1 is None or desc2 is None:
-            return 0.0
-        try:
-            matches = self.matcher.match(desc1, desc2)
-            if len(matches) < 5:
-                return 0.0
-            matches = sorted(matches, key=lambda x: x.distance)
-            good_matches = matches[:min(20, len(matches))]
-            avg_distance = sum(m.distance for m in good_matches) / len(good_matches)
-            return max(0, 1.0 - (avg_distance / 100.0))
-        except:
-            return 0.0
-    
-    def calculate_motion_consistency(self, bbox1, bbox2):
-        c1 = ((bbox1[0] + bbox1[2]) / 2, (bbox1[1] + bbox1[3]) / 2)
-        c2 = ((bbox2[0] + bbox2[2]) / 2, (bbox2[1] + bbox2[3]) / 2)
-        displacement = np.sqrt((c2[0] - c1[0])**2 + (c2[1] - c1[1])**2)
-        return max(0, 1.0 - (displacement / self.motion_threshold))
-    
-    def update(self, frame, detections_with_masks, frame_number):
-        current_frame_people = {}
-        detection_features = []
-        for bbox, mask in detections_with_masks:
-            keypoints, descriptors = self.extract_person_features(frame, bbox, mask)
-            detection_features.append((bbox, mask, keypoints, descriptors))
-        matched_pairs = []
-        used_detections = set()
-        used_people = set()
-        for person_id, person_data in self.tracked_people.items():
-            if person_id in used_people:
-                continue
-            best_match_idx = None
-            best_score = 0
-            for idx, (det_bbox, det_mask, det_kp, det_desc) in enumerate(detection_features):
-                if idx in used_detections:
-                    continue
-                feature_score = self.calculate_feature_similarity(person_data.get('descriptors'), det_desc)
-                motion_score = self.calculate_motion_consistency(person_data.get('bbox'), det_bbox)
-                combined_score = (feature_score * 0.7) + (motion_score * 0.3)
-                if combined_score > self.feature_threshold and combined_score > best_score:
-                    best_score = combined_score
-                    best_match_idx = idx
-            if best_match_idx is not None:
-                matched_pairs.append((person_id, best_match_idx))
-                used_people.add(person_id)
-                used_detections.add(best_match_idx)
-        for person_id, det_idx in matched_pairs:
-            det_bbox, det_mask, det_kp, det_desc = detection_features[det_idx]
-            self.tracked_people[person_id].update({
-                'bbox': det_bbox,
-                'mask': det_mask,
-                'keypoints': det_kp,
-                'descriptors': det_desc,
-                'last_frame': frame_number,
-                'disappeared': 0,
-            })
-            current_frame_people[person_id] = self.tracked_people[person_id]
-        for idx, (det_bbox, det_mask, det_kp, det_desc) in enumerate(detection_features):
-            if idx not in used_detections:
-                self.tracked_people[self.next_id] = {
-                    'bbox': det_bbox,
-                    'mask': det_mask,
-                    'keypoints': det_kp,
-                    'descriptors': det_desc,
-                    'last_frame': frame_number,
-                    'disappeared': 0,
-                    'scanned': False,
-                    'gesture_detected': False,
-                    'first_seen_frame': frame_number
-                }
-                current_frame_people[self.next_id] = self.tracked_people[self.next_id]
-                self.next_id += 1
-        for person_id in self.tracked_people:
-            if person_id not in current_frame_people:
-                self.tracked_people[person_id]['disappeared'] += 1
-        to_remove = [pid for pid, data in self.tracked_people.items() if data['disappeared'] > self.max_disappeared]
-        for pid in to_remove:
-            del self.tracked_people[pid]
-        return current_frame_people
-    
-    def mark_person_scanned(self, person_id):
-        if person_id in self.tracked_people:
-            self.tracked_people[person_id]['scanned'] = True
-    
-    def mark_gesture_detected(self, person_id):
-        if person_id in self.tracked_people:
-            self.tracked_people[person_id]['gesture_detected'] = True
-    
-    def get_unscanned_people(self):
-        return {pid: data for pid, data in self.tracked_people.items() if not data.get('scanned', False) and data['disappeared'] == 0}
-    
-    def get_people_with_gestures(self):
-        return {pid: data for pid, data in self.tracked_people.items() if data.get('gesture_detected', False)}
-    
-    def get_person_ids_to_blur(self):
-        return {pid for pid, data in self.tracked_people.items() if data.get('gesture_detected', False)}

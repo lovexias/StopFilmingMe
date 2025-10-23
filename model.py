@@ -416,79 +416,119 @@ class EditorCore:
     # ────────────────────────────────────────────────────────────────
     # Export (FFmpeg when available; fallback to OpenCV)
     # ────────────────────────────────────────────────────────────────
-    def export_video(self, output_path, progress_cb=None):
-        if not self.video_path:
+    # model.py – inside class EditorCore
+
+    def export_video(self, out_path, progress_cb=None):
+        """
+        Write the video to out_path, preferring blurred frames from disk cache,
+        then in-memory cache, and finally falling back to clean frames.
+        Honors rotation and export overrides set via set_export_overrides().
+        """
+        import cv2, os
+
+        if not getattr(self, "video_path", None):
             return False
 
-        # use user’s chosen container/codec, but our fast path ignores codec during A (OpenCV),
-        # then mux audio in B without re-encoding video
-        src_w = self.src_w or int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
-        src_h = self.src_h or int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
-        src_fps = self.fps if self.fps else float(self.cap.get(cv2.CAP_PROP_FPS) or 30.0)
-
-        out_w, out_h = self.export_override_res or (src_w, src_h)
-        out_fps = self.export_override_fps or src_fps
-
-        root, ext = os.path.splitext(output_path)
-        want_ext = "." + (self.export_container or "mp4")
-        if ext.lower() != want_ext:
-            output_path = root + want_ext
-
-        # 0) If nothing was blurred, fast remux/copy original -> output
-        has_disk_blurs = bool(
-            getattr(self, "blur_cache_dir", None)
-            and os.path.isdir(self.blur_cache_dir)
-            and any(n.endswith(".jpg") for n in os.listdir(self.blur_cache_dir))
-        )
-        if not (self.blurred_frames or has_disk_blurs):
-            # nothing blurred → copy original
-            ffmpeg = shutil.which("ffmpeg")
-            if ffmpeg:
-                cmd = [ffmpeg, "-y", "-i", self.video_path, "-c", "copy", output_path]
-                subprocess.run(cmd, check=False)
-                return os.path.exists(output_path)
-            else:
-                try:
-                    shutil.copy2(self.video_path, output_path)
-                    return True
-                except Exception:
-                    return False
-
-        # 1) Step A: create a fast intermediate video (video only) with OpenCV
-        tmp_dir = tempfile.mkdtemp(prefix="export_fast_")
-        tmp_video = os.path.join(tmp_dir, "video_only.mp4")
-
-        ok = self._write_intermediate_video_fast(
-            tmp_video, out_w, out_h, out_fps, progress_cb=progress_cb
-        )
-        if not ok:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        cap = cv2.VideoCapture(self.video_path)
+        if not cap.isOpened():
             return False
 
-        # 2) Step B: Mux original audio onto the intermediate (no video re-encode)
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            # We’ll just move the video-only file to output (no audio)
-            shutil.move(tmp_video, output_path)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        try:
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or getattr(self, "total_frames", 0) or 0
+            fps   = float(getattr(self, "export_fps", 0)) or float(getattr(self, "fps", 30.0)) or 30.0
+            rot   = int(getattr(self, "rotation_angle", 0) or 0)
+
+            # Read one frame to determine natural (rotated) size
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, fr0 = cap.read()
+            if not ok or fr0 is None:
+                cap.release()
+                return False
+
+            # Apply rotation to determine output size
+            def _apply_rotation(img):
+                if rot == 90:
+                    return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+                elif rot == 180:
+                    return cv2.rotate(img, cv2.ROTATE_180)
+                elif rot == 270:
+                    return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                return img
+
+            fr0_rot = _apply_rotation(fr0)
+
+            # Export overrides (resolution)
+            # Expecting set_export_overrides(resolution, fps) to have set:
+            #   self.export_width, self.export_height (or None) and self.export_fps (optional)
+            tgt_w = int(getattr(self, "export_width", 0) or 0)
+            tgt_h = int(getattr(self, "export_height", 0) or 0)
+            if tgt_w <= 0 or tgt_h <= 0:
+                H, W = fr0_rot.shape[:2]
+                tgt_w, tgt_h = (W, H)
+
+            # FourCC by codec/format (you already sanitize H.264 -> mp4v in MainWindow)
+            codec = (getattr(self, "export_codec", None) or "mp4v").lower()
+            fourcc = cv2.VideoWriter_fourcc(*(
+                "mp4v" if codec in ("mp4v", "mpeg4") else
+                "XVID" if codec in ("xvid", "avi") else
+                "mp4v"
+            ))
+            writer = cv2.VideoWriter(out_path, fourcc, fps, (tgt_w, tgt_h))
+            if not writer.isOpened():
+                cap.release()
+                return False
+
+            # Where blurred frames may live
+            blur_cache_dir = getattr(self, "blur_cache_dir", None)
+            has_disk_cache = bool(blur_cache_dir and os.path.isdir(blur_cache_dir))
+            ram_cache = getattr(self, "blurred_cache", {}) or {}
+
+            # Export loop
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            for idx in range(total):
+                ok, raw = cap.read()
+                if not ok or raw is None:
+                    break
+
+                # 1) Try disk cached blurred frame
+                frame_out = None
+                if has_disk_cache:
+                    p = os.path.join(blur_cache_dir, f"{idx:06d}.jpg")
+                    if os.path.exists(p):
+                        frame_out = cv2.imread(p)
+
+                # 2) Try RAM cached blurred frame
+                if frame_out is None and idx in ram_cache:
+                    frame_out = ram_cache[idx]
+
+                # 3) Fallback to clean frame
+                if frame_out is None:
+                    frame_out = raw
+
+                # Apply rotation to the chosen frame (match what you show on screen)
+                frame_out = _apply_rotation(frame_out)
+
+                # Resize to target if needed
+                H, W = frame_out.shape[:2]
+                if (W, H) != (tgt_w, tgt_h):
+                    frame_out = cv2.resize(frame_out, (tgt_w, tgt_h), interpolation=cv2.INTER_AREA)
+
+                writer.write(frame_out)
+
+                # progress
+                if progress_cb and total > 0:
+                    progress_cb((idx + 1) * 100.0 / total)
+
+            writer.release()
+            cap.release()
             return True
+        except Exception as e:
+            try:
+                cap.release()
+            except Exception:
+                pass
+            return False
 
-        # Keep audio from original; copy video from intermediate
-        cmd = [
-            ffmpeg, "-y",
-            "-i", tmp_video,    # video-only
-            "-i", self.video_path,  # original for audio
-            "-map", "0:v:0",
-            "-map", "1:a:0?",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "128k",
-            "-shortest",
-            output_path
-        ]
-        subprocess.run(cmd, check=False)
-
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        return os.path.exists(output_path)
 
         
     def _export_with_ffmpeg_and_audio(self, output_path: str, out_w: int, out_h: int, out_fps: float, progress_cb=None):

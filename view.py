@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtWidgets import QMessageBox
 
+
 # Premiere Pro Style Colors - Professional Dark Theme
 APP_BG = "#1e1e1e"         # Main background (darker)
 PANEL_BG = "#232323"       # Panel backgrounds
@@ -1684,7 +1685,8 @@ class EnhancedEditorPanel(QWidget):
             
             # Set position and size
             self.highlight_widget.setGeometry(display_x1, display_y1, display_width, display_height)
-            self.highlight_widget.set_bbox(display_x1, display_y1, display_width, display_height)
+            self.highlight_widget.set_bbox(0, 0, display_width, display_height)   # local to the overlay
+
             self.highlight_widget.show()
             
             # Start pulse animation
@@ -2201,7 +2203,7 @@ class EnhancedEditorPanel(QWidget):
             pass
         self._dlg_detect = None
 
-        
+
     #EXPORTING
     def start_export_progress(self):
         self._dlg_export = ProcessingDialog(self, "Exporting", "Writing video file…", 100, False)
