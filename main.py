@@ -17,6 +17,7 @@ import cv2
 from ultralytics import YOLO
 from PyQt5.QtCore import QUrl
 import webbrowser
+from moviepy import VideoFileClip
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAction, QFileDialog, QMessageBox, QDialog,
@@ -465,6 +466,14 @@ class MainWindow(QMainWindow):
 
         
         meta = self.core.load_video(vid_path)
+        
+
+        # Get and apply consistent MoviePy rotation (matches clean_gesture_blur.py)
+        self._moviepy_rotation = self._get_rotation_from_metadata(vid_path)
+        self.core.rotation_angle = self._moviepy_rotation
+        print(f"[IMPORT] MoviePy rotation metadata: {self._moviepy_rotation}°")
+
+        
         old_panel = self.editor_panel
         if hasattr(old_panel, 'cleanup_audio_resources'):
             old_panel.cleanup_audio_resources()
@@ -640,17 +649,32 @@ class MainWindow(QMainWindow):
             self.editor_panel.toggle_button.setText("Play")
             self.editor_panel.audio_pause()
 
+    def _get_rotation_from_metadata(self, path):
+        """Get rotation metadata consistently from MOV/MP4 files using MoviePy."""
+        try:
+            clip = VideoFileClip(path)
+            rotation = int(getattr(clip, "rotation", 0) or 0)
+            clip.close()
+            if rotation not in (0, 90, 180, 270):
+                rotation = 0
+        except Exception:
+            rotation = 0
+        return rotation
+
+
     def _apply_rotation(self, frame):
+        """Apply consistent frame rotation based on actual metadata (matches clean_gesture_blur.py)."""
         if frame is None:
             return None
-        ra = getattr(self.core, "rotation_angle", 0) or 0
-        if ra == 90:
+        rotation = getattr(self, "_moviepy_rotation", 0)
+        if rotation == 90:
             return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif ra == 180:
+        elif rotation == 180:
             return cv2.rotate(frame, cv2.ROTATE_180)
-        elif ra == 270:
+        elif rotation == 270:
             return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         return frame
+
 
     def _on_frame_changed(self, frame_idx: int):
         try:
@@ -729,7 +753,18 @@ class MainWindow(QMainWindow):
         cap = cv2.VideoCapture(video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        rotation = getattr(self.core, "rotation_angle", 0)
+        try:
+            clip = VideoFileClip(video_path)
+            rotation = int(getattr(clip, "rotation", 0) or 0)
+            clip.close()
+            self._moviepy_rotation = rotation
+            print(f"[DEBUG] MoviePy rotation metadata: {self._moviepy_rotation}°")
+
+        except Exception:
+            rotation = getattr(self.core, "rotation_angle", 0) or 0
+            self._moviepy_rotation = rotation
+            print(f"[DEBUG] MoviePy rotation metadata: {self._moviepy_rotation}°")
+
         cap.release()
 
         print("=" * 70)
@@ -762,12 +797,8 @@ class MainWindow(QMainWindow):
 
 
             # Rotate if needed
-            if rotation == 90:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-            elif rotation == 180:
-                frame = cv2.rotate(frame, cv2.ROTATE_180)
-            elif rotation == 270:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            frame = self._apply_rotation(frame)
+
 
             people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
             if people_detected:
@@ -856,12 +887,7 @@ class MainWindow(QMainWindow):
                         break
 
                     # Rotate
-                    if rotation == 90:
-                        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-                    elif rotation == 180:
-                        frame = cv2.rotate(frame, cv2.ROTATE_180)
-                    elif rotation == 270:
-                        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    frame = self._apply_rotation(frame)
 
                     people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
                     if not people_detected:
@@ -1104,12 +1130,8 @@ class MainWindow(QMainWindow):
                 break
 
             # Apply rotation
-            if rotation == 90:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-            elif rotation == 180:
-                frame = cv2.rotate(frame, cv2.ROTATE_180)
-            elif rotation == 270:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            frame = self._apply_rotation(frame)
+
 
             # Run YOLO every N frames
             if frame_idx % detection_interval == 0:

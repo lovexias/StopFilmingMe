@@ -1,654 +1,414 @@
-# Clean gesture-based face blurring - produces clean output video
-# Two-pass processing: 1) Detect gestures, 2) Create clean blurred video
-
+# clean_gesture_blur.py
+import os
+import time
 import cv2
 import numpy as np
 import mediapipe as mp
+from moviepy import VideoFileClip  # for rotation metadata
+
+# === Shared project utilities (no duplication) ===
 from utilities import (
-    WaveDetector,
-    HandOverFaceDetector,
     detect_multiple_people_yolov8,
-    get_video_rotation,
-    close_global_mediapipe,
-    mp_face_global,
-    match_person_to_blur_list,
-    adjust_bounding_box_aspect_ratio,
     detect_gesture_in_person_box,
+    PersonTracker,
     blur_faces_of_person,
-    PersonTracker
+    close_global_mediapipe,
 )
 
-# Configuration
-video_path = "D:\\Portrait_Moving.mp4"  # Input video file path
-GESTURE_TYPE = "wave"  # Change to "hand_over_face" to test the other detector
-OUTPUT_PATH = "clean_blurred_output.mp4"  # Clean output video file name
-SHOW_UI = True  # Set to False to disable real-time UI display
-UI_SCALE_FACTOR = 0.5  # Scale factor for UI display (0.5 = half size for better performance)
+# =========================
+# Configuration (kept in sync with main.py)
+# =========================
+video_path = r"D:\01 KYLE\School\College\4th Year\3rd Term\THS-ST2\HOF-20251102T082520Z-1-001\HOF\indoor_hof\nearface_hof\onehandpalmfront_2ft_nearface_indoor.MOV"
+OUTPUT_PATH = "clean_blurred_output.mp4"
 
-# Modify these configuration values
-DISCOVERY_FRAME_SKIP = 70  # Increased from 60 to 90
-ANALYSIS_FRAME_SKIP = 35   # For person analysis from 30 to 60
-GESTURE_DURATION = 3       # Reduced from 3 to 2 seconds
-YOLO_DETECTION_INTERVAL = 5  # Run YOLO every 15 frames instead of 5
+SHOW_UI = True
+UI_SCALE_FACTOR = 0.5
+DISCOVERY_FRAME_SKIP = 70
+ANALYSIS_FRAME_SKIP = 35
+GESTURE_DURATION = 3
+YOLO_DETECTION_INTERVAL = 10
+GESTURE_TYPES = ["wave", "hand_over_face"]  # order matters (same as main’s loop intent)
 
-mp_pose_global = mp.solutions.pose.Pose()
+# =========================
+# Orientation helpers (keep)
+# =========================
+def get_video_rotation(video_path: str) -> int:
+    """Get rotation using moviepy clip metadata; fall back to 0."""
+    try:
+        clip = VideoFileClip(video_path)
+        rotation = int(getattr(clip, "rotation", 0) or 0)
+        clip.close()
+        return rotation if rotation in (0, 90, 180, 270) else 0
+    except Exception:
+        return 0
 
-def draw_person_box(frame, bbox, person_id, status="Detecting", color=(0, 255, 0)):
-    """Draw bounding box around detected person with status text."""
-    x1, y1, x2, y2 = bbox
-    
-    # Draw bounding box
+def orient_frame(frame, rotation: int):
+    if rotation == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    elif rotation == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    elif rotation == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return frame
+
+# =========================
+# UI helpers (keep)
+# =========================
+def draw_person_box(frame, bbox, pid, status="Detecting", color=(0, 255, 0)):
+    x1, y1, x2, y2 = map(int, bbox)
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-    
-    # Prepare text
-    text = f"Person {person_id}: {status}"
-    
-    # Calculate text size and position
+    text = f"Person {pid}: {status}"
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.6
-    thickness = 2
-    (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-    
-    # Background rectangle for text
-    text_x = x1
-    text_y = y1 - 10
-    if text_y < text_height:
-        text_y = y1 + text_height + 10
-    
-    cv2.rectangle(frame, (text_x, text_y - text_height - 5), 
-                  (text_x + text_width + 10, text_y + 5), color, -1)
-    
-    # White text
-    cv2.putText(frame, text, (text_x + 5, text_y - 5), font, font_scale, (255, 255, 255), thickness)
-    
+    scale, thick = 0.6, 2
+    (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
+    ty = max(th + 5, y1 - 10)
+    cv2.rectangle(frame, (x1, ty - th - 4), (x1 + tw + 10, ty + 4), color, -1)
+    cv2.putText(frame, text, (x1 + 4, ty), font, scale, (255, 255, 255), thick)
     return frame
 
-def draw_info_panel(frame, frame_count, total_frames, pass_info, detected_gestures=0):
-    """Draw information panel on the frame."""
-    height, width = frame.shape[:2]
-    
-    # Background for info panel
-    panel_height = 120
-    cv2.rectangle(frame, (10, 10), (400, panel_height), (0, 0, 0), -1)
-    cv2.rectangle(frame, (10, 10), (400, panel_height), (255, 255, 255), 2)
-    
-    # Text information
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.5
-    thickness = 1
-    color = (255, 255, 255)
-    
-    y_pos = 30
-    line_spacing = 20
-    
-    # Pass information
-    cv2.putText(frame, f"Pass: {pass_info}", (20, y_pos), font, font_scale, color, thickness)
-    y_pos += line_spacing
-    
-    # Frame information
-    progress = (frame_count / total_frames * 100) if total_frames > 0 else 0
-    cv2.putText(frame, f"Frame: {frame_count}/{total_frames} ({progress:.1f}%)", 
-                (20, y_pos), font, font_scale, color, thickness)
-    y_pos += line_spacing
-    
-    # Gesture type
-    cv2.putText(frame, f"Gesture: {GESTURE_TYPE.replace('_', ' ').title()}", 
-                (20, y_pos), font, font_scale, color, thickness)
-    y_pos += line_spacing
-    
-    # Detected gestures count
-    cv2.putText(frame, f"Gestures Found: {detected_gestures}", 
-                (20, y_pos), font, font_scale, color, thickness)
-    y_pos += line_spacing
-    
-    # Instructions
-    cv2.putText(frame, "Press 'q' to quit, 's' to skip", 
-                (20, y_pos), font, font_scale, (0, 255, 255), thickness)
-    
-    return frame
-
-def scale_frame_for_display(frame, scale_factor):
-    """Scale frame for display while maintaining aspect ratio."""
-    if scale_factor == 1.0:
+# pose overlay is purely visual
+_mp_pose_for_ui = mp.solutions.pose.Pose()
+def draw_skeleton_green(frame, bbox):
+    x1, y1, x2, y2 = map(int, bbox)
+    roi = frame[y1:y2, x1:x2]
+    if roi.size == 0:
         return frame
-    
-    height, width = frame.shape[:2]
-    new_width = int(width * scale_factor)
-    new_height = int(height * scale_factor)
-    
-    return cv2.resize(frame, (new_width, new_height))
+    results = _mp_pose_for_ui.process(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
+    if not results.pose_landmarks:
+        return frame
+    h, w = roi.shape[:2]
+    pts = []
+    for lm in results.pose_landmarks.landmark:
+        px = int(lm.x * w) + x1
+        py = int(lm.y * h) + y1
+        pts.append((px, py))
+        cv2.circle(frame, (px, py), 3, (0, 255, 0), -1)
+    for i, j in mp.solutions.pose.POSE_CONNECTIONS:
+        if i < len(pts) and j < len(pts):
+            cv2.line(frame, pts[i], pts[j], (0, 255, 0), 2)
+    return frame
 
-def analyze_person_across_entire_video(video_path, person_tracker, person_id, gesture_type, fps, rotation):
+def scale_frame_for_display(frame, factor):
+    if factor == 1.0:
+        return frame
+    h, w = frame.shape[:2]
+    return cv2.resize(frame, (int(w * factor), int(h * factor)))
+
+def safe_destroy_window(name: str):
+    try:
+        if cv2.getWindowProperty(name, cv2.WND_PROP_VISIBLE) >= 0:
+            cv2.destroyWindow(name)
+    except cv2.error:
+        pass
+
+# =========================
+# PASS 1 — Discover & analyze gestures (match main.py)
+# =========================
+def first_pass_detect_gestures(video_path, fps, rotation, tracker: PersonTracker):
     """
-    Analyze a specific person across the entire video to detect gestures.
-    Returns True if gesture is detected anywhere in the video for this person.
+    Mirrors main.py:_on_detect_requested for consistent results:
+    - discovery using DISCOVERY_FRAME_SKIP
+    - adaptive clarity thresholds based on early sampling
+    - analyze per person for GESTURE_TYPES
+    - early stop per person if gesture found or face unclear
     """
-    print(f"  📹 Scanning entire video for Person ID {person_id}...")
-    
+    tracker.tracked_people.clear()
+    tracker.next_id = 0
+
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_skip = ANALYSIS_FRAME_SKIP  # For person analysis
-    
-    gesture_detected_for_person = False
-    frames_checked = 0
-    person_appearances = 0
-    
-    for frame_num in range(0, total_frames, frame_skip):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-        ret, frame = cap.read()
+
+    print("=" * 70)
+    print("PASS 1: OPTIMIZED GESTURE DETECTION (Improved Skip Logic)")
+    print("=" * 70)
+    print(f"Video: {video_path}")
+    print(f"Total Frames: {total_frames}, FPS: {fps:.2f}, Rotation: {rotation}°")
+
+    # --- Pre-scan: estimate clarity (exact sampling like main.py) ---
+    print("\nEstimating average video clarity...")
+    sharp_samples, bright_samples = [], []
+    for i in range(0, min(total_frames, 300), max(1, total_frames // 50 or 1)):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+        ret, fr = cap.read()
         if not ret:
             break
-            
-        # Apply rotation
-        if rotation == 90:
-            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif rotation == 180:
-            frame = cv2.rotate(frame, cv2.ROTATE_180)
-        elif rotation == 270:
-            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        
-        # Create UI frame if enabled
-        ui_frame = frame.copy() if SHOW_UI else None
-        
-        # Detect people in current frame
-        people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-        
-        if not people_detected:
-            # Show scanning progress even when no people detected
-            if SHOW_UI and frames_checked % 20 == 0:  # Update every 20 frames
-                progress = (frame_num / total_frames) * 100
-                ui_frame = draw_info_panel(ui_frame, frame_num, total_frames, 
-                                         f"Analyzing Person ID {person_id} for {gesture_type}", 
-                                         person_appearances)
-                
-                cv2.putText(ui_frame, f"Scanning... ({progress:.1f}%)", (50, 200), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-                cv2.putText(ui_frame, f"Person appearances so far: {person_appearances}", (50, 230), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                
-                display_frame = scale_frame_for_display(ui_frame, UI_SCALE_FACTOR)
-                cv2.imshow(f"Analyzing Person {person_id}", display_frame)
-                cv2.waitKey(1)
-            continue
-            
-        # Update tracker to match people
-        current_people = person_tracker.update(frame, people_detected, frame_num)
-        
-        # Show UI for current analysis
-        if SHOW_UI:
-            progress = (frame_num / total_frames) * 100
-            ui_frame = draw_info_panel(ui_frame, frame_num, total_frames, 
-                                     f"Analyzing Person ID {person_id} for {gesture_type}", 
-                                     person_appearances)
-            
-            # Draw all detected people, highlight target person
-            for pid, person_data in current_people.items():
-                bbox = person_data['bbox']
-                if pid == person_id:
-                    ui_frame = draw_person_box(ui_frame, bbox, pid, "TARGET PERSON", (0, 255, 0))
-                else:
-                    ui_frame = draw_person_box(ui_frame, bbox, pid, "Other", (128, 128, 128))
-            
-            # Add progress text
-            cv2.putText(ui_frame, f"Scanning: {progress:.1f}%", (50, 200), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-            cv2.putText(ui_frame, f"Person appearances: {person_appearances}", (50, 230), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            
-            display_frame = scale_frame_for_display(ui_frame, UI_SCALE_FACTOR)
-            cv2.imshow(f"Analyzing Person {person_id}", display_frame)
-            cv2.waitKey(1)
-        
-        # Check if our target person is in this frame
-        if person_id in current_people:
-            person_appearances += 1
-            person_data = current_people[person_id]
-            person_bbox = person_data['bbox']
-
-            # Get keypoints for the person in the bounding box
-            keypoints = get_person_keypoints(frame, person_bbox)
-
-            # Show skeleton popup before gesture analysis
-            if SHOW_UI and keypoints:
-                show_skeleton_popup(frame, person_bbox, keypoints, "Analyzing...")
-
-            gesture_detected = detect_gesture_in_person_box(
-                person_bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION
-            )
-
-            # Show skeleton popup after gesture analysis with result
-            if SHOW_UI and keypoints:
-                gesture_status = "Detected" if gesture_detected else "Not Detected"
-                show_skeleton_popup(frame, person_bbox, keypoints, gesture_status)
-            
-            if gesture_detected:
-                print(f"    ✅ {gesture_type.replace('_', ' ').title()} detected for Person ID {person_id}!")
-                
-                # Show success in UI
-                if SHOW_UI:
-                    ui_frame = draw_person_box(ui_frame, person_bbox, person_id, "GESTURE DETECTED!", (0, 255, 0))
-                    cv2.putText(ui_frame, f"{gesture_type.upper()} FOUND!", (50, 260), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 3)
-                    display_frame = scale_frame_for_display(ui_frame, UI_SCALE_FACTOR)
-                    cv2.imshow(f"Analyzing Person {person_id}", display_frame)
-                    cv2.waitKey(1000)  # Show success for 1 second
-                
-                gesture_detected_for_person = True
-                break  # Found gesture, no need to continue
-            else:
-                # Show no gesture found in UI
-                if SHOW_UI:
-                    ui_frame = draw_person_box(ui_frame, person_bbox, person_id, "No gesture here", (255, 0, 0))
-                    display_frame = scale_frame_for_display(ui_frame, UI_SCALE_FACTOR)
-                    cv2.imshow(f"Analyzing Person {person_id}", display_frame)
-                    cv2.waitKey(50)
-                
-        frames_checked += 1
-        
-        # Progress update every 100 frames checked
-        if frames_checked % 100 == 0:
-            progress = (frame_num / total_frames) * 100
-            print(f"    📊 Progress: {progress:.1f}% - Person appearances: {person_appearances}")
-    
+        fr = orient_frame(fr, rotation)
+        gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+        sharp_samples.append(cv2.Laplacian(gray, cv2.CV_64F).var())
+        bright_samples.append(gray.mean())
     cap.release()
-    if SHOW_UI:
-        cv2.destroyAllWindows()  # Close analysis window
-    
-    if gesture_detected_for_person:
-        print(f"  ✅ RESULT: Person ID {person_id} performed {gesture_type} - will be blurred")
-    else:
-        print(f"  ❌ RESULT: Person ID {person_id} did NOT perform {gesture_type}")
-        
-    print(f"  📈 Stats: Checked {frames_checked} frames, found person in {person_appearances} frames")
-    
-    return gesture_detected_for_person
 
-def first_pass_detect_gestures(video_path, fps, rotation):
-    """
-    First pass: Identify which people should be permanently blurred throughout the video.
-    Uses PersonTracker to identify unique people and analyzes each person across the entire video.
-    Returns a tuple: (list of people who should be blurred, the PersonTracker instance)
-    """
-    print("PASS 1: Analyzing video for gesture detection...")
-    print(f"🎯 Strategy: Track unique people, then scan entire video for each person's gestures")
-    
-    # Initialize person tracker
-    person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
-    
-    # STEP 1: First pass to discover all unique people in the video
-    print("\n📋 STEP 1: Discovering all unique people in the video...")
+    avg_sharp = float(np.mean(sharp_samples)) if sharp_samples else 50.0
+    avg_bright = float(np.mean(bright_samples)) if bright_samples else 100.0
+    print(f"Avg sharpness: {avg_sharp:.1f}, Avg brightness: {avg_bright:.1f}")
+
+    sharp_thresh = max(10.0, avg_sharp * 0.4)
+    bright_thresh = max(25.0, avg_bright * 0.5)
+    area_thresh = 5000
+    print(f"Using thresholds -> sharpness<{sharp_thresh:.1f}, brightness<{bright_thresh:.1f}, area<{area_thresh}")
+
+    # --- Stage 1: Discover people (sparse scan) ---
+    print("\nSTEP 1: Discovering people...")
     cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    discovery_frame_skip = DISCOVERY_FRAME_SKIP  # Increased from 60 to 90
-    
-    # Discover all unique people
-    for frame_count in range(0, total_frames, discovery_frame_skip):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
+    for frame_idx in range(0, total_frames, DISCOVERY_FRAME_SKIP):
+        ret = cap.grab()  # quicker than set+read on some codecs; we’ll still reorient on retrieve
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         if not ret:
             break
-        
-        # Apply rotation
-        if rotation == 90:
-            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif rotation == 180:
-            frame = cv2.rotate(frame, cv2.ROTATE_180)
-        elif rotation == 270:
-            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        
-        # Create UI frame if enabled
-        ui_frame = frame.copy() if SHOW_UI else None
-        
-        # Detect people and update tracker
+
+        frame = orient_frame(frame, rotation)
+
         people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
         if people_detected:
-            current_people = person_tracker.update(frame, people_detected, frame_count)
-            if current_people:
-                progress = (frame_count / total_frames) * 100
-                print(f"  📊 Discovery Progress: {progress:.1f}% - Total unique people found: {len(person_tracker.tracked_people)}")
-                
-                # Draw UI if enabled
-                if SHOW_UI:
-                    # Draw info panel
-                    ui_frame = draw_info_panel(ui_frame, frame_count, total_frames, 
-                                             f"1 - Discovering People ({len(person_tracker.tracked_people)} unique)", 
-                                             len(person_tracker.tracked_people))
-                    
-                    # Draw all detected people with their IDs
-                    for person_id, person_data in current_people.items():
-                        bbox = person_data['bbox']
-                        is_new = person_data.get('first_seen_frame', 0) == frame_count
-                        status = "NEW PERSON!" if is_new else f"ID: {person_id}"
-                        color = (0, 255, 0) if is_new else (255, 255, 0)  # Green for new, yellow for existing
-                        ui_frame = draw_person_box(ui_frame, bbox, person_id, status, color)
-                    
-                    # Scale and display
-                    display_frame = scale_frame_for_display(ui_frame, UI_SCALE_FACTOR)
-                    cv2.imshow("Person Discovery - Pass 1", display_frame)
-                    
-                    # Handle key presses
-                    key = cv2.waitKey(50) & 0xFF  # Slower for better visibility
-                    if key == ord('q'):
-                        break
-                    elif key == ord('s'):
-                        # Skip ahead in discovery
-                        frame_count += discovery_frame_skip * 5  # Skip 5 intervals ahead
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
-        else:
-            # Show UI even when no people detected
-            if SHOW_UI:
-                progress = (frame_count / total_frames) * 100
-                ui_frame = draw_info_panel(ui_frame, frame_count, total_frames, 
-                                         f"1 - Discovering People ({len(person_tracker.tracked_people)} unique)", 
-                                         len(person_tracker.tracked_people))
-                
-                # Add "No people detected" text
-                cv2.putText(ui_frame, "No people detected in this frame", (50, 200), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                
-                display_frame = scale_frame_for_display(ui_frame, UI_SCALE_FACTOR)
-                cv2.imshow("Person Discovery - Pass 1", display_frame)
-                
-                key = cv2.waitKey(10) & 0xFF
-                if key == ord('q'):
-                    break
-    
-    cap.release()
-    if SHOW_UI:
-        cv2.destroyAllWindows()  # Close discovery window
-    
-    discovered_people = list(person_tracker.tracked_people.keys())
-    print(f"\n🎉 STEP 1 COMPLETE: Discovered {len(discovered_people)} unique people")
-    
-    if not discovered_people:
-        print("❌ No people found in the video!")
-        return []
-    
-    # STEP 2: Analyze each unique person across the entire video
-    print(f"\n🔍 STEP 2: Analyzing each person across entire video for {GESTURE_TYPE} gestures...")
-    people_to_blur_permanently = []
-    
-    for i, person_id in enumerate(discovered_people):
-        print(f"\n👤 Analyzing Person {i+1}/{len(discovered_people)} (ID: {person_id})")
-        
-        # Mark this person as being scanned
-        person_tracker.mark_person_scanned(person_id)
-        
-        # Analyze this person across the entire video
-        has_gesture = analyze_person_across_entire_video(
-            video_path, person_tracker, person_id, GESTURE_TYPE, fps, rotation
-        )
-        
-        if has_gesture:
-            # Mark person for blurring
-            person_tracker.mark_gesture_detected(person_id)
-            
-            # Get the person's bbox from tracker (use the last known position)
-            person_data = person_tracker.tracked_people[person_id]
-            bbox = person_data['bbox']
-            person_center = ((bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2)
-            
-            people_to_blur_permanently.append({
-                'person_id': person_id,
-                'bbox': bbox,
-                'center': person_center,
-                'first_detected_frame': person_data.get('first_seen_frame', 0)
-            })
-            
-            print(f"  ✅ Person ID {person_id} will be blurred throughout the video")
-        else:
-            print(f"  ❌ Person ID {person_id} will NOT be blurred")
-    
-    print(f"\n🎉 PASS 1 COMPLETE:")
-    print(f"- Discovered {len(discovered_people)} unique people")
-    print(f"- Found {len(people_to_blur_permanently)} people who should be blurred")
-    print(f"- Each person was analyzed across the entire video")
-    
-    return people_to_blur_permanently, person_tracker  # Return both the list and the tracker
+            tracker.update(frame, people_detected, frame_idx)
 
-def second_pass_create_clean_video(video_path, people_to_blur, person_tracker_from_pass1, fps, rotation, frame_width, frame_height):
+        if SHOW_UI:
+            ui = frame.copy()
+            for pid, pdata in tracker.tracked_people.items():
+                draw_person_box(ui, pdata["bbox"], pid, "Tracking", (0, 255, 0))
+            cv2.imshow("Pass 1 – Discovery", scale_frame_for_display(ui, UI_SCALE_FACTOR))
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        # small delay to mimic GUI pacing
+        time.sleep(0.02)
+
+    cap.release()
+    safe_destroy_window("Pass 1 – Discovery")
+    discovered_people = list(tracker.tracked_people.keys())
+    print(f"\nSTEP 1 COMPLETE: {len(discovered_people)} people discovered.")
+
+    # --- Stage 2: Analyze gestures per person ---
+    print("\nSTEP 2: Analyzing gestures (adaptive clarity filter)...")
+    people_to_blur = []
+    gesture_found_for_person = {pid: False for pid in discovered_people}
+    unclear_face_for_person = {pid: False for pid in discovered_people}
+
+    # process gesture types in order; stop early per person as in main.py
+    for gesture_type in GESTURE_TYPES:
+        print(f"\nChecking gesture type: {gesture_type}")
+
+        for pid in discovered_people:
+            if gesture_found_for_person[pid]:
+                print(f"Skipping Person {pid} (already has gesture)")
+                continue
+            if unclear_face_for_person[pid]:
+                print(f"Skipping Person {pid} (face unclear or not visible)")
+                continue
+
+            print(f"  Analyzing Person {pid} for {gesture_type}...")
+            cap = cv2.VideoCapture(video_path)
+
+            for frame_num in range(0, total_frames, ANALYSIS_FRAME_SKIP):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                frame = orient_frame(frame, rotation)
+
+                people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+                if not people_detected:
+                    time.sleep(0.01)
+                    continue
+
+                current_people = tracker.update(frame, people_detected, frame_num)
+                if pid not in current_people:
+                    time.sleep(0.01)
+                    continue
+
+                bbox = tuple(map(int, current_people[pid]["bbox"]))
+                x1, y1, x2, y2 = bbox
+                roi = frame[y1:y2, x1:x2]
+                if roi.size == 0:
+                    continue
+
+                # adaptive clarity check (exactly like main.py)
+                gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+                brightness = gray.mean()
+                area = (x2 - x1) * (y2 - y1)
+
+                if sharpness < sharp_thresh or brightness < bright_thresh or area < area_thresh:
+                    unclear_face_for_person[pid] = True
+                    print(
+                        f"    Face unclear for Person {pid} "
+                        f"(sharp={sharpness:.1f}/{sharp_thresh:.1f}, "
+                        f"bright={brightness:.1f}/{bright_thresh:.1f}) – skipping."
+                    )
+                    break
+
+                if SHOW_UI:
+                    vis = frame.copy()
+                    draw_skeleton_green(vis, bbox)
+                    draw_person_box(vis, bbox, pid, f"Checking {gesture_type.title()}...", (0, 255, 0))
+                    cv2.imshow(f"Analyzing Person {pid}", scale_frame_for_display(vis, UI_SCALE_FACTOR))
+                    cv2.waitKey(1)
+
+                detected = detect_gesture_in_person_box(
+                    bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION
+                )
+
+                if detected:
+                    gesture_found_for_person[pid] = True
+                    pdata = tracker.tracked_people[pid]
+                    people_to_blur.append({
+                        "person_id": pid,
+                        "gesture": gesture_type,
+                        "frame": frame_num,
+                        "bbox": bbox,
+                        "first_seen_frame": pdata.get("first_seen_frame", 0)
+                    })
+                    print(f"    Detected {gesture_type} for Person {pid}")
+                    break
+
+                # small delay to mimic GUI pacing
+                time.sleep(0.01)
+
+            cap.release()
+
+            # close the per-person window if shown
+            if SHOW_UI:
+                safe_destroy_window(f"Analyzing Person {pid}")
+
+        # stop outer gesture loop if all people done
+        if all(gesture_found_for_person[pid] or unclear_face_for_person[pid] for pid in discovered_people):
+            break
+
+    # Deduplicate by person_id (last wins), consistent with main's finalization
+    unique_people = {p["person_id"]: p for p in people_to_blur}
+    people_to_blur = list(unique_people.values())
+
+    print("\nDETECTION COMPLETE:")
+    print(f"- Total people with gestures: {len(people_to_blur)}")
+    print(f"- IDs: {[p['person_id'] for p in people_to_blur]}")
+    print("=" * 70)
+    print("PASS 1 COMPLETE — Ready for blurring.")
+    print("=" * 70)
+
+    return people_to_blur
+
+# =========================
+# PASS 2 — Blur & burn-in reason (reuse tracker for ID consistency)
+# =========================
+def second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, out_w, out_h, tracker: PersonTracker):
     """
-    Second pass: Create clean output video with only the necessary face blurring.
-    Uses the same PersonTracker instance from Pass 1 to maintain person identity consistency.
-    Shows real-time UI if enabled.
+    Mirrors main.py:_on_blur_requested logic:
+    - reuse same PersonTracker instance across passes
+    - periodic YOLO re-detection
+    - blur targeted IDs
+    - burn-in reason label
+    - UI preview window
     """
-    print("\nPASS 2: Creating clean blurred video...")
-    
-    # Initialize video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = cv2.VideoWriter(OUTPUT_PATH, fourcc, fps, (frame_width, frame_height))
-    
+    reason_by_id = {p["person_id"]: p.get("gesture", "?") for p in people_to_blur}
+    person_ids_to_blur = {p["person_id"] for p in people_to_blur}
+
+    # Reset disappeared counts so re-detections don’t get dropped immediately
+    for pid in tracker.tracked_people:
+        tracker.tracked_people[pid]["disappeared"] = 0
+
     cap = cv2.VideoCapture(video_path)
-    frame_count = 0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    # Use the SAME PersonTracker instance from Pass 1 to maintain ID consistency
-    # Reset disappeared counts to allow redetection
-    for person_id in person_tracker_from_pass1.tracked_people:
-        person_tracker_from_pass1.tracked_people[person_id]['disappeared'] = 0
-    
-    # Extract the person IDs that should be blurred
-    person_ids_to_blur = {person['person_id'] for person in people_to_blur}
-    print(f"Will blur Person IDs: {person_ids_to_blur}")
-    print(f"PersonTracker has {len(person_tracker_from_pass1.tracked_people)} people from Pass 1")
-    
-    # Optimization: Run YOLO detection every N frames
-    yolo_detection_interval = YOLO_DETECTION_INTERVAL  # Run YOLO every 15 frames instead of 5
-    last_detected_people_with_masks = []  # Cache of last YOLO detections with masks
-    
-    while cap.isOpened():
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(OUTPUT_PATH, fourcc, fps, (out_w, out_h))
+
+    print(f"PASS 2: Blurring people: {sorted(person_ids_to_blur)}")
+    last_dets = []
+
+    for fidx in range(total_frames):
         ret, frame = cap.read()
         if not ret:
             break
-        
-        # Apply rotation if needed
-        if rotation == 90:
-            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif rotation == 180:
-            frame = cv2.rotate(frame, cv2.ROTATE_180)
-        elif rotation == 270:
-            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        
-        # Create UI frame before any modifications
-        ui_frame = frame.copy() if SHOW_UI else None
-        
-        # Run YOLO detection only every N frames
-        if frame_count % yolo_detection_interval == 0:
-            yolo_detections = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-            last_detected_people_with_masks = yolo_detections  # Keep full (bbox, mask) tuples
-            if frame_count % 100 == 0:  # Debug info
-                print(f"  Frame {frame_count}: YOLO detected {len(last_detected_people_with_masks)} people")
-        
-        # Use PersonTracker to maintain identity consistency
-        current_tracked_people = {}
-        if last_detected_people_with_masks:
-            current_tracked_people = person_tracker_from_pass1.update(frame, last_detected_people_with_masks, frame_count)
-        
-        # Track which people are being blurred in this frame
-        blurred_people = []
-        
-        # Blur faces of people who should be permanently blurred (based on person ID)
-        for person_id, person_data in current_tracked_people.items():
-            if person_id in person_ids_to_blur:
-                bbox = person_data['bbox']
-                # Blur this person's face
-                frame = blur_faces_of_person(frame, bbox)
-                blurred_people.append(bbox)
-                
-                if frame_count % 50 == 0:  # Debug info every 50 frames
-                    print(f"  Frame {frame_count}: Blurring Person ID {person_id}")
-            else:
-                if frame_count % 50 == 0:  # Debug info every 50 frames
-                    print(f"  Frame {frame_count}: NOT blurring Person ID {person_id} (not in blur list: {person_ids_to_blur})")
-        
-        # Draw UI if enabled
+
+        frame = orient_frame(frame, rotation)
+
+        # periodic YOLO re-detection
+        if fidx % YOLO_DETECTION_INTERVAL == 0:
+            last_dets = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+
+        cur_people = tracker.update(frame, last_dets, fidx)
+
+        # UI overlay (preview)
         if SHOW_UI:
-            # Update info panel
-            ui_frame = draw_info_panel(ui_frame, frame_count, total_frames, 
-                                     f"2 - Blurring Video ({len(blurred_people)} blurred)", len(people_to_blur))
-            
-            # Draw all tracked people with their IDs and blur status
-            for person_id, person_data in current_tracked_people.items():
-                bbox = person_data['bbox']
-                if person_id in person_ids_to_blur:
-                    ui_frame = draw_person_box(ui_frame, bbox, person_id, "BLURRED", (0, 255, 0))
-                else:
-                    ui_frame = draw_person_box(ui_frame, bbox, person_id, "Normal", (0, 255, 255))
-            
-            # Show which person IDs should be blurred
-            text_y = 150
-            cv2.putText(ui_frame, f"Blur IDs: {list(person_ids_to_blur)}", (50, text_y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            
-            # Show the blurred result in a small overlay
-            if blurred_people:
-                # Create a small overlay showing the blurred frame
-                overlay_size = (200, 150)
-                blurred_overlay = cv2.resize(frame, overlay_size)
-                
-                # Position overlay in top-right corner
-                overlay_x = ui_frame.shape[1] - overlay_size[0] - 20
-                overlay_y = 20
-                
-                # Add border
-                cv2.rectangle(ui_frame, (overlay_x - 2, overlay_y - 2), 
-                             (overlay_x + overlay_size[0] + 2, overlay_y + overlay_size[1] + 2), 
-                             (255, 255, 255), 2)
-                
-                # Add overlay
-                ui_frame[overlay_y:overlay_y + overlay_size[1], 
-                        overlay_x:overlay_x + overlay_size[0]] = blurred_overlay
-                
-                # Add label
-                cv2.putText(ui_frame, "Output Preview", (overlay_x, overlay_y - 5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            
-            # Scale and display
-            display_frame = scale_frame_for_display(ui_frame, UI_SCALE_FACTOR)
-            cv2.imshow("Face Blurring - Pass 2", display_frame)
-            
-            # Handle key presses
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
+            ui = frame.copy()
+
+        # blur targeted IDs
+        for pid, pdata in cur_people.items():
+            if pid in person_ids_to_blur:
+                frame = blur_faces_of_person(frame, tuple(map(int, pdata["bbox"])))
+                if SHOW_UI:
+                    reason = reason_by_id.get(pid, "?")
+                    draw_person_box(ui, pdata["bbox"], pid, f"BLURRED ({reason})", (0, 255, 0))
+            elif SHOW_UI:
+                draw_person_box(ui, pdata["bbox"], pid, "Normal", (0, 255, 255))
+
+        # burn-in small reason label on the final output frame
+        for pid, pdata in cur_people.items():
+            if pid in person_ids_to_blur:
+                reason = reason_by_id.get(pid, "?")
+                x1, y1, x2, y2 = map(int, pdata["bbox"])
+                cv2.rectangle(frame, (x1, max(0, y1 - 24)), (x1 + 160, y1), (0, 0, 0), -1)
+                cv2.putText(frame, f"{pid}: {reason}", (x1 + 5, y1 - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+
+        if SHOW_UI:
+            cv2.imshow("Pass 2 – Blurring", scale_frame_for_display(ui, UI_SCALE_FACTOR))
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
-            elif key == ord('s'):
-                # Skip ahead 100 frames
-                frame_count += 100
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
-                continue
-        
-        # Write clean frame to output video
-        video_writer.write(frame)
-        
-        # Progress indicator
-        if frame_count % 100 == 0:
-            progress = (frame_count / total_frames) * 100
-            print(f"  Progress: {progress:.1f}% ({frame_count}/{total_frames} frames)")
-        
-        frame_count += 1
-    
-    # Cleanup
+
+        writer.write(frame)
+
+        # tiny pacing for determinism vs GUI
+        if fidx % 3 == 0:
+            time.sleep(0.005)
+
     cap.release()
-    video_writer.release()
-    if SHOW_UI:
-        cv2.destroyAllWindows()
-    
-    print(f"\nPASS 2 COMPLETE:")
-    print(f"- Processed {frame_count} frames")
-    print(f"- YOLO detection interval: {yolo_detection_interval} frames")
-    print(f"- Used PersonTracker for consistent identity matching")
-    print(f"- Blurred only Person IDs: {person_ids_to_blur}")
-    print(f"- Clean video saved to: {OUTPUT_PATH}")
+    writer.release()
+    safe_destroy_window("Pass 2 – Blurring")
+    print("PASS 2 COMPLETE.")
 
-def show_skeleton_popup(frame, bbox, keypoints, gesture_status):
-    x1, y1, x2, y2 = bbox
-    roi = frame[y1:y2, x1:x2].copy()
 
-    # Draw keypoints
-    for (x, y) in keypoints:
-        cv2.circle(roi, (int(x - x1), int(y - y1)), 5, (0, 255, 0), -1)
-
-    # Draw skeleton connections using MediaPipe's POSE_CONNECTIONS
-    for i, j in mp.solutions.pose.POSE_CONNECTIONS:
-        if i < len(keypoints) and j < len(keypoints):
-            cv2.line(roi, (int(keypoints[i][0] - x1), int(keypoints[i][1] - y1)),
-                          (int(keypoints[j][0] - x1), int(keypoints[j][1] - y1)),
-                          (255, 0, 0), 2)
-
-    # Add gesture status text
-    cv2.putText(roi, f"Gesture: {gesture_status}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-
-    cv2.imshow("Gesture Detection - Skeleton", roi)
-    cv2.waitKey(500)
-
-def get_person_keypoints(frame, bbox):
-    x1, y1, x2, y2 = bbox
-    roi = frame[y1:y2, x1:x2]
-    results = mp_pose_global.process(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
-    keypoints = []
-    if results.pose_landmarks:
-        for lm in results.pose_landmarks.landmark:
-            kp_x = int(lm.x * (x2 - x1)) + x1
-            kp_y = int(lm.y * (y2 - y1)) + y1
-            keypoints.append((kp_x, kp_y))
-    return keypoints
-
+# =========================
+# Main (standalone runner)
+# =========================
 def main():
-    # Get video properties
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video not found: {video_path}")
+
     cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    rotation = get_video_rotation(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
-    
-    # Handle invalid FPS
-    if fps <= 0 or fps is None:
-        fps = 30.0
-        print("Warning: Invalid FPS detected, defaulting to 30 FPS")
-    
-    # Adjust dimensions for rotation
-    if rotation in [90, 270]:
-        frame_width, frame_height = frame_height, frame_width
-    
+
+    rotation = get_video_rotation(video_path)
+    out_w, out_h = (raw_h, raw_w) if rotation in (90, 270) else (raw_w, raw_h)
+
     print("=" * 70)
-    print("CLEAN GESTURE-BASED FACE BLURRING")
+    print("CLEAN GESTURE BLURRING — Standalone Harness (matches app logic)")
     print("=" * 70)
-    print(f"Input video: {video_path}")
-    print(f"Output video: {OUTPUT_PATH}")
-    print(f"Video properties: {frame_width}x{frame_height} @ {fps} FPS")
-    print(f"Total frames: {total_frames}")
-    print(f"Rotation: {rotation}°")
-    print(f"Gesture type: {GESTURE_TYPE.replace('_', ' ').title()}")
-    print(f"Real-time UI: {'Enabled' if SHOW_UI else 'Disabled'}")
-    if SHOW_UI:
-        print(f"UI Scale: {UI_SCALE_FACTOR * 100:.0f}%")
-        print("Controls: 'q' = quit, 's' = skip ahead")
-    print("=" * 70)
-    
-    # Pass 1: Detect gestures and identify people to blur
-    people_to_blur, person_tracker = first_pass_detect_gestures(video_path, fps, rotation)
-    
-    if not people_to_blur:
-        print(f"\nNo {GESTURE_TYPE.replace('_', ' ').lower()} gestures detected in the video.")
-        print("Creating output video without any blurring...")
-    
-    # Pass 2: Create clean blurred video using the same PersonTracker
-    second_pass_create_clean_video(video_path, people_to_blur, person_tracker, fps, rotation, frame_width, frame_height)
-    
-    print(f"\n🎉 COMPLETE! Clean blurred video saved as: {OUTPUT_PATH}")
-    print(f"📊 Summary: {len(people_to_blur)} people permanently blurred throughout the video")
+    print(f"Input: {video_path}")
+    print(f"FPS: {fps:.2f}, Size: {raw_w}x{raw_h}, Rotation: {rotation}")
+
+    # use ONE tracker across both passes to keep IDs consistent
+    tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
+
+    people_to_blur = first_pass_detect_gestures(video_path, fps, rotation, tracker)
+    second_pass_create_clean_video(video_path, people_to_blur, fps, rotation, out_w, out_h, tracker)
+
+    print(f"Done! Output saved to {OUTPUT_PATH}")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nProcess interrupted by user")
+        print("\nInterrupted by user.")
     except Exception as e:
-        print(f"\nError occurred: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"\nError: {e}")
+        import traceback; traceback.print_exc()
     finally:
-        close_global_mediapipe()
+        try:
+            close_global_mediapipe()
+        except Exception:
+            pass
