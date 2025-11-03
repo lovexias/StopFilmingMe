@@ -18,7 +18,7 @@ from utilities import (
 # =========================
 # Configuration (kept in sync with main.py)
 # =========================
-video_path = r"D:\01 KYLE\School\College\4th Year\3rd Term\THS-ST2\HOF-20251102T082520Z-1-001\HOF\indoor_hof\nearface_hof\onehandpalmfront_2ft_nearface_indoor.MOV"
+video_path = r"D:\01 KYLE\School\College\4th Year\3rd Term\THS-ST2\StopFilmingMe\WAVE-20251103T101757Z-1-001\WAVE\indoor_wave\awayface_wave\twohandspalmfront_2ft_awayface_indoor.MOV"
 OUTPUT_PATH = "clean_blurred_output.mp4"
 
 SHOW_UI = True

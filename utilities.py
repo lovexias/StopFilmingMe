@@ -384,13 +384,13 @@ class WaveDetector:
         self.fps = fps or 30.0
         self.hands = mp.solutions.hands.Hands(
             max_num_hands=1,
-            min_detection_confidence=detection_confidence
+            min_detection_confidence=0.3
         )
         self.pose = mp.solutions.pose.Pose(
             static_image_mode=False,
             model_complexity=2,
-            min_detection_confidence=0.8,
-            min_tracking_confidence=0.8
+            min_detection_confidence=0.3,
+            min_tracking_confidence=0.3
         )
         self.drawer = mp.solutions.drawing_utils
 
@@ -423,7 +423,7 @@ class WaveDetector:
                     media_x = sum(xs) / len(xs)
                     direction = None
                     if last_x is not None:
-                        threshold = 0.005
+                        threshold = 0.01
                         if media_x < last_x - threshold:
                             direction = "left"
                         elif media_x > last_x + threshold:
@@ -755,8 +755,20 @@ def detect_gesture_in_person_box(person_box, frame_source, gesture_type="wave", 
         if not ret:
             break
             
-        adj_x1, adj_y1, adj_x2, adj_y2 = adjust_bounding_box_aspect_ratio(x1, y1, x2, y2, frame.shape)
+        # --- Expand ROI to make gesture detection less aggressive ---
+        expand_ratio = 0.15  # expand 15% outward in all directions
+        w, h = x2 - x1, y2 - y1
+        expand_x = int(w * expand_ratio)
+        expand_y = int(h * expand_ratio)
+
+        ex1 = max(0, x1 - expand_x)
+        ey1 = max(0, y1 - expand_y)
+        ex2 = min(frame.shape[1], x2 + expand_x)
+        ey2 = min(frame.shape[0], y2 + expand_y)
+
+        adj_x1, adj_y1, adj_x2, adj_y2 = adjust_bounding_box_aspect_ratio(ex1, ey1, ex2, ey2, frame.shape)
         person_crop = frame[adj_y1:adj_y2, adj_x1:adj_x2]
+
         
         if person_crop.size == 0:
             continue
