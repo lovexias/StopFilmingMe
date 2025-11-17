@@ -128,7 +128,8 @@ class BlurPersonWorker(QThread):
             if blur_bbox is not None:
                 # AFTER
                 base = self.core.blurred_cache.get(frame_idx, frame)
-                out  = blur_faces_of_person(base, blur_bbox)
+                # Use core wrapper so UI-driven blur settings apply
+                out  = self.core.apply_blur_to_frame(base, blur_bbox)
                 self.core.blurred_cache[frame_idx] = out
                 self.core.blurred_frames.add(frame_idx)
 
@@ -283,6 +284,12 @@ class MainWindow(QMainWindow):
         self.editor_panel.thumbnailClicked.connect(self._on_thumbnail_clicked)
         self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
         self.editor_panel.exportRequested.connect(self._on_save_project)
+
+        # Connect blur UI -> core
+        try:
+            self._wire_blur_ui()
+        except Exception:
+            pass
 
         # Playback timer
         self.play_timer = QTimer()
@@ -489,6 +496,10 @@ class MainWindow(QMainWindow):
         self.editor_panel.thumbnailClicked.connect(self._on_thumbnail_clicked)
         self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
         self.editor_panel.exportRequested.connect(self._on_save_project)
+        try:
+            self._wire_blur_ui()
+        except Exception:
+            pass
 
         self.editor_panel.set_video_info(
             rotation_angle=meta["rotation_angle"],
@@ -1024,10 +1035,21 @@ class MainWindow(QMainWindow):
 
         # these are the *new* people to blur in this pass
         new_ids = set(self.persistent_blur_ids) - prev_ids
+        # If the user selected any ID that was already persisted, request a reprocess
+        # so we regenerate blurred frames from the original (not layered blurs).
+        reprocess_existing = any(pid in prev_ids for pid in selected_ids)
+        if reprocess_existing:
+            print("🔁 Reprocessing existing persisted blur IDs to apply new settings.")
+            # target_ids becomes all persistent IDs (rebuild them)
+            target_ids = set(self.persistent_blur_ids)
+        else:
+            # only apply blurs for newly-added IDs (fast path)
+            target_ids = set(new_ids)
 
         print(f"Prev IDs: {sorted(prev_ids)}")
         print(f"Selected IDs this pass: {sorted(selected_ids)}")
         print(f"New IDs to blur this pass: {sorted(new_ids)}")
+        print(f"Target IDs this run: {sorted(target_ids)}")
 
         #BLUR- CANCEL-----------//
         # --- Staging so we can roll back on cancel ---
@@ -1144,17 +1166,23 @@ class MainWindow(QMainWindow):
             else:
                 current_people = last_tracked_people.copy()
 
-            # Use previously blurred frame as the base if it exists, so older blurs persist.
-            frame_path = os.path.join(cache_dir, f"{frame_idx:06d}.jpg")
-            if os.path.exists(frame_path):
-                base = cv2.imread(frame_path)     # already has all *previous* people
-            else:
+            # Decide base: if we need to reprocess existing persisted IDs, always start
+            # from the original frame (so new settings replace previous blurs). Otherwise
+            # prefer the cached frame which already contains previously committed blurs.
+            if reprocess_existing:
                 base = frame.copy()
+            else:
+                frame_path = os.path.join(cache_dir, f"{frame_idx:06d}.jpg")
+                if os.path.exists(frame_path):
+                    base = cv2.imread(frame_path)
+                else:
+                    base = frame.copy()
 
             blurred_frame = base
 
-           # Blur only the NEW people for this pass; old ones are already in 'base'
-            for pid in list(new_ids):
+            # Blur the target ids for this run. If reprocessing we will iterate all
+            # persistent IDs (target_ids contains them). Otherwise it's just new_ids.
+            for pid in list(target_ids):
                 ref_bb = self.ref_bbox_for.get(pid, (0,0,0,0))
                 match_pid, match_bb, match_iou = _best_match_bbox(ref_bb, current_people)
 
@@ -1172,7 +1200,7 @@ class MainWindow(QMainWindow):
                     match_bb = best
 
                 if match_bb is not None:
-                    blurred_frame = blur_faces_of_person(blurred_frame, match_bb)
+                    blurred_frame = self.core.apply_blur_to_frame(blurred_frame, match_bb)
                     self.ref_bbox_for[pid] = match_bb
 
 
@@ -1467,6 +1495,52 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+
+     # ---------------- Blur UI wiring & handlers ----------------
+    def _wire_blur_ui(self):
+        """Attach EditorPanel blur controls to EditorCore (call after creating/replacing editor_panel)."""
+        try:
+            # Avoid wiring more than once per EditorPanel instance (preserve panel internal handlers)
+            if getattr(self.editor_panel, "_blur_ui_wired", False):
+                return
+
+            # connect controller handler for slider (do NOT disconnect panel internal handlers)
+            self.editor_panel.blur_strength.valueChanged.connect(self._on_blur_strength_changed)
+
+            # connect radio buttons for blur type changes
+            self.editor_panel.rb_gauss.toggled.connect(lambda checked: checked and self._on_blur_type_changed('gaussian'))
+            self.editor_panel.rb_pixel.toggled.connect(lambda checked: checked and self._on_blur_type_changed('pixelate'))
+            self.editor_panel.rb_solid.toggled.connect(lambda checked: checked and self._on_blur_type_changed('solid'))
+
+            # initialize core params from current UI state
+            initial_type = 'gaussian' if self.editor_panel.rb_gauss.isChecked() else ('pixelate' if self.editor_panel.rb_pixel.isChecked() else 'solid')
+            self.core.set_blur_params(initial_type, int(self.editor_panel.blur_strength.value()))
+
+            # mark wired so recreating panel doesn't reattach duplicate handlers
+            setattr(self.editor_panel, "_blur_ui_wired", True)
+        except Exception:
+            pass
+
+    def _on_blur_strength_changed(self, value: int):
+        """Called when user changes blur strength slider."""
+        try:
+            # determine current type from radios
+            btype = 'gaussian'
+            if getattr(self.editor_panel, 'rb_pixel', None) and self.editor_panel.rb_pixel.isChecked():
+                btype = 'pixelate'
+            elif getattr(self.editor_panel, 'rb_solid', None) and self.editor_panel.rb_solid.isChecked():
+                btype = 'solid'
+            self.core.set_blur_params(btype, int(value))
+        except Exception:
+            pass
+
+    def _on_blur_type_changed(self, blur_type: str):
+        """Called when user switches blur type radio buttons."""
+        try:
+            strength = int(getattr(self.editor_panel, "blur_strength", None).value()) if getattr(self.editor_panel, "blur_strength", None) else self.core.blur_strength
+            self.core.set_blur_params(blur_type, strength)
+        except Exception:
+            pass
     
 
     def _show_documentation(self):

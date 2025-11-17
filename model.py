@@ -56,6 +56,40 @@ class EditorCore:
         self.detected_people = []  # To store gesture detection results
         self.highlighted_person_ids = set() # Stores person_ids to highlight
 
+        # --- Blur settings controlled by UI ---
+        self.blur_type = 'gaussian'
+        self.blur_strength = 50 
+
+    def set_blur_params(self, blur_type: str, strength: int):
+        try:
+            bt = str(blur_type).lower()
+            if bt not in ('gaussian', 'pixelate', 'solid'):
+                bt = 'gaussian'
+            self.blur_type = bt
+        except Exception:
+            self.blur_type = 'gaussian'
+        try:
+            self.blur_strength = int(max(0, min(100, int(strength))))
+        except Exception:
+            self.blur_strength = 50
+
+    def apply_blur_to_frame(self, frame_bgr, bbox):
+        """Wrapper that applies the configured blur type/strength to frame for the given bbox."""
+        # Use local import to avoid circular issues and to use updated utilities
+        from utilities import blur_faces_of_person as util_blur
+        if frame_bgr is None:
+            return None
+        # Work on a copy so original is not mutated unexpectedly
+        base = frame_bgr.copy()
+        try:
+            out = util_blur(base, bbox, blur_type=self.blur_type, strength=self.blur_strength)
+            return out
+        except Exception:
+            # Fallback: try a simple gaussian if something fails
+            try:
+                return util_blur(base, bbox, blur_type='gaussian', strength=self.blur_strength)
+            except Exception:
+                return frame_bgr
 
     def close_video(self):
         # stop using the current capture and clear caches
@@ -718,9 +752,8 @@ class EditorCore:
                         break
 
             if last_matched_bbox is not None:
-                
                 base = self.blurred_cache.get(frame_idx, frame)
-                frame_b = blur_faces_of_person(base, last_matched_bbox)
+                frame_b = self.apply_blur_to_frame(base, last_matched_bbox)
                 self.blurred_cache[frame_idx] = frame_b
                 self.blurred_frames.add(frame_idx)
                 blurred_frames.append(frame_idx)

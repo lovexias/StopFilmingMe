@@ -525,52 +525,102 @@ class HandOverFaceDetector:
         return hand_over_face_frames
 
 # OPTIMIZED: Face blurring function
-def blur_faces_of_person(frame, bbox):
-    """OPTIMIZED: Blur faces within the specified bounding box region."""
+def blur_faces_of_person(frame, bbox, blur_type='gaussian', strength=50):
+    """OPTIMIZED: Blur faces within the specified bounding box region.
+
+    Backwards-compatible: previous callers that only pass (frame, bbox) still work.
+    blur_type: 'gaussian' | 'pixelate' | 'solid'
+    strength: 0..100 (percent, higher => stronger)
+    """
     if bbox is None:
         return frame
-        
+
     try:
         x1, y1, x2, y2 = bbox
     except (TypeError, ValueError):
         return frame
-        
-    h, w, _ = frame.shape
-    
-    # SPEED: Ensure coordinates are within frame bounds
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(w, x2), min(h, y2)
-    
+
+    h, w = frame.shape[:2]
+
+    # Ensure coordinates are within frame bounds
+    x1, y1 = max(0, int(x1)), max(0, int(y1))
+    x2, y2 = min(w, int(x2)), min(h, int(y2))
+
     if x2 <= x1 or y2 <= y1:
         return frame
-    
-    # Extract person region
+
     person_crop = frame[y1:y2, x1:x2]
     if person_crop.size == 0:
         return frame
 
-    # OPTIMIZATION: Use global MediaPipe face detector
+    # Normalize strength
+    try:
+        s = float(strength)
+    except Exception:
+        s = 50.0
+    s = max(0.0, min(100.0, s))
+
+    # Use MediaPipe to detect faces inside the person crop
     person_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
     face_result = mp_face_global.process(person_rgb)
 
-    if face_result.detections:
-        for detection in face_result.detections:
-            box = detection.location_data.relative_bounding_box
-            fx = int(box.xmin * (x2 - x1)) + x1
-            fy = int(box.ymin * (y2 - y1)) + y1
-            fw = int(box.width * (x2 - x1))
-            fh = int(box.height * (y2 - y1))
+    if not face_result.detections:
+        # If no face detected, we still may want to apply a person-level blur (optional)
+        # For now: return frame unchanged
+        return frame
 
-            # Ensure coordinates are within frame bounds
-            fx, fy = max(0, fx), max(0, fy)
-            fw = min(fw, w - fx)
-            fh = min(fh, h - fy)
+    for detection in face_result.detections:
+        box = detection.location_data.relative_bounding_box
+        fx = int(box.xmin * (x2 - x1)) + x1
+        fy = int(box.ymin * (y2 - y1)) + y1
+        fw = int(box.width * (x2 - x1))
+        fh = int(box.height * (y2 - y1))
 
-            if fw > 0 and fh > 0:
-                face_roi = frame[fy:fy+fh, fx:fx+fw]
-                # SPEED: Use smaller blur kernel for faster processing
-                blurred_face = cv2.GaussianBlur(face_roi, (51, 51), 0)
-                frame[fy:fy+fh, fx:fx+fw] = blurred_face
+        fx, fy = max(0, fx), max(0, fy)
+        fw = max(0, min(fw, w - fx))
+        fh = max(0, min(fh, h - fy))
+
+        if fw <= 0 or fh <= 0:
+            continue
+
+        face_roi = frame[fy:fy+fh, fx:fx+fw]
+
+        # Gaussian blur: map strength->kernel size (odd)
+        if blur_type == 'gaussian':
+            # Kernel range: small->(3,3), large->(101,101)
+            k = int(3 + (s / 100.0) * 98)  # 3..101
+            if k % 2 == 0:
+                k += 1
+            k = max(3, min(101, k))
+            blurred_face = cv2.GaussianBlur(face_roi, (k, k), 0)
+            frame[fy:fy+fh, fx:fx+fw] = blurred_face
+
+        elif blur_type == 'pixelate':
+            # Pixelate by resizing down then up. Map strength->block size
+            max_block = max(4, min(64, int((s / 100.0) * 64)))
+            block = max(2, max_block)
+            h_roi, w_roi = face_roi.shape[:2]
+            # downscale
+            small_w = max(1, w_roi // block)
+            small_h = max(1, h_roi // block)
+            temp = cv2.resize(face_roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+            pixelated = cv2.resize(temp, (w_roi, h_roi), interpolation=cv2.INTER_NEAREST)
+            frame[fy:fy+fh, fx:fx+fw] = pixelated
+
+        elif blur_type == 'solid':
+            # Solid fill with mean color; strength controls blending between original and solid
+            mean_color = cv2.mean(face_roi)[:3]  # BGR
+            fill = np.full_like(face_roi, tuple(map(int, mean_color)))
+            alpha = s / 100.0
+            blended = cv2.addWeighted(fill, alpha, face_roi, 1.0 - alpha, 0)
+            frame[fy:fy+fh, fx:fx+fw] = blended
+
+        else:
+            # Unknown type: fallback to a moderate gaussian
+            k = 25 if s >= 50 else 9
+            if k % 2 == 0:
+                k += 1
+            frame[fy:fy+fh, fx:fx+fw] = cv2.GaussianBlur(face_roi, (k, k), 0)
 
     return frame
 
