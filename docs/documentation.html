@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy-Enhanced Video Editor - Docs</title>
+    <!-- 1. Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 2. Google Font (Inter) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- 3. Custom Styles -->
+    <style>
+        /* Use Inter font */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        /* Smooth scrolling */
+        html {
+            scroll-behavior: smooth;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1f2937;
+            /* gray-800 */
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #4b5563;
+            /* gray-600 */
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
+            /* gray-500 */
+        }
+
+        /* Active sidebar link style */
+        .sidebar-link.active {
+            background-color: #3b82f6;
+            /* blue-500 */
+            color: white;
+            font-weight: 600;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-900 text-gray-200">
+
+    <!-- Sidebar Navigation -->
+    <nav class="fixed top-0 left-0 w-64 h-screen bg-gray-800 p-6 shadow-lg z-10 overflow-y-auto">
+        <h1 class="text-2xl font-bold text-white mb-6">
+            Privacy Video Editor
+        </h1>
+        <ul class="space-y-2">
+            <li><a href="#intro"
+                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Introduction</a>
+            </li>
+            <li><a href="#features"
+                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Features</a>
+            </li>
+            <li><a href="#installation"
+                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Installation</a>
+            </li>
+            <li><a href="#usage"
+                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">How
+                    to Use</a></li>
+            <li><a href="#code"
+                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Code
+                    Structure</a></li>
+            <li><a href="#shortcuts"
+                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Shortcuts</a>
+            </li>
+        </ul>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="ml-64 p-10 max-w-7xl mx-auto">
+
+        <!-- Introduction Section -->
+        <section id="intro" class="mb-16 min-h-screen">
+            <h2 class="text-4xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Introduction</h2>
+            <p class="text-lg text-gray-300 leading-relaxed mb-6">
+                Welcome to the documentation for the Privacy-Enhanced Video Editor. This is a desktop application built
+                with Python, PyQt5, and OpenCV, designed to help you edit videos with a focus on privacy.
+            </p>
+            <p class="text-lg text-gray-300 leading-relaxed mb-8">
+                The application uses a powerful <strong class="text-blue-400">YOLOv8 model</strong> to automatically
+                detect people in your videos. You can then use its features to track individuals and automatically blur
+                faces, ensuring privacy before sharing your footage.
+            </p>
+
+            <!-- Image Screenshot -->
+            <!-- IMPORTANT: This assumes 'image_ffb11f.png' is in the same folder as this HTML file -->
+            <img src="image_application.png" alt="Application Screenshot"
+                class="w-full max-w-3xl mx-auto rounded-lg shadow-2xl border-4 border-gray-700"
+                onerror="this.alt='Screenshot image (image_application.png) not found. Make sure it is in the same folder as this HTML file.'; this.style.display='block'; this.style.color='red'; this.style.padding='1rem'; this.style.border='1px dashed red'; this.style.backgroundColor='#ffebee';">
+        </section>
+
+        <!-- Features Section -->
+        <section id="features" class="mb-16">
+            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Features</h2>
+            <ul class="list-disc list-inside space-y-3 text-lg text-gray-300">
+                <li class="flex items-start">
+                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
+                    <strong>Person Detection:</strong> Uses a YOLOv8 model for high-accuracy person detection in video
+                    frames.
+                </li>
+                <li class="flex items-start">
+                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
+                    <strong>Face Blurring:</strong> Automatically blurs the faces of detected people to protect their
+                    privacy.
+                </li>
+                <li class="flex items-start">
+                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
+                    <strong>Gesture Detection:</strong> Can detect gestures within the bounding box of a person (feature
+                    from `detect_gesture_in_person_box`).
+                </li>
+                <li class="flex items-start">
+                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
+                    <strong>Video Playback:</strong> A custom editor panel for loading, playing, and scrubbing through
+                    videos.
+                </li>
+                <li class="flex items-start">
+                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
+                    <strong>Export Functionality:</strong> A dedicated dialog to export the processed video with
+                    settings for quality and format.
+                </li>
+                <li class="flex items-start">
+                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
+                    <strong>Modern UI:</strong> Built with PyQt5, providing a responsive and native desktop experience.
+                </li>
+            </ul>
+        </section>
+
+        <!-- Installation Section -->
+        <section id="installation" class="mb-16">
+            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Installation</h2>
+            <p class="text-lg text-gray-300 leading-relaxed mb-6">
+                To run this application locally, you'll need Python and several packages.
+            </p>
+
+            <h3 class="text-2xl font-semibold text-white mb-3">1. Get the Code</h3>
+            <p class="text-gray-300 mb-4">
+                You should have all the project files (`main.py`, `view.py`, `model.py`, etc.) in a single directory.
+            </p>
+
+            <h3 class="text-2xl font-semibold text-white mb-3">2. Install Dependencies</h3>
+            <p class="text-gray-300 mb-4">
+                Based on the imports, you'll need the following packages. You can install them using pip.
+            </p>
+            <pre class="bg-gray-800 p-4 rounded-lg text-gray-100 overflow-x-auto">
+<code>pip install PyQt5 numpy opencv-python ultralytics</code></pre>
+            <p class="text-gray-300 my-4">
+                It's highly recommended to create a Python virtual environment to manage these dependencies.
+            </p>
+
+            <h3 class="text-2xl font-semibold text-white mb-3">3. Run the Application</h3>
+            <p class="text-gray-300 mb-4">
+                Once the dependencies are installed, you can run the application by executing the `main.py` script.
+            </p>
+            <pre class="bg-gray-800 p-4 rounded-lg text-gray-100 overflow-x-auto">
+<code>python main.py</code></pre>
+        </section>
+
+        <!-- How to Use Section -->
+        <section id="usage" class="mb-16">
+            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">How to Use</h2>
+            <p class="text-lg text-gray-300 leading-relaxed mb-6">
+                The application is controlled via the main menu bar.
+            </p>
+
+            <h3 class="text-2xl font-semibold text-white mb-3">File Menu</h3>
+            <ul class="list-disc list-inside space-y-2 text-gray-300 mb-6">
+                <li><strong>Open Video:</strong> Opens a file dialog to select a video file for processing.</li>
+                <li><strong>Export Video:</strong> Opens the export dialog to save your processed video.</li>
+                <li><strong>Exit:</strong> Closes the application.</li>
+            </ul>
+
+            <h3 class="text-2xl font-semibold text-white mb-3">Edit Menu</h3>
+            <ul class="list-disc list-inside space-y-2 text-gray-300 mb-6">
+                <li><strong>Keyboard Shortcuts:</strong> Opens a dialog displaying all available keyboard shortcuts.
+                </li>
+            </ul>
+
+            <h3 class="text-2xl font-semibold text-white mb-3">Settings Menu</h3>
+            <ul class="list-disc list-inside space-y-2 text-gray-300 mb-6">
+                <li><strong>Video Settings:</strong> <span class="text-yellow-400">(Note: Currently not implemented as
+                        per `main.py`)</span></li>
+                <li><strong>Detection Settings:</strong> <span class="text-yellow-400">(Note: Currently not implemented
+                        as per `main.py`)</span></li>
+                <li><strong>Blur Settings:</strong> <span class="text-yellow-400">(Note: Currently not implemented as
+                        per `main.py`)</span></li>
+            </ul>
+
+            <h3 class="text-2xl font-semibold text-white mb-3">Help Menu</h3>
+            <ul class="list-disc list-inside space-y-2 text-gray-300 mb-6">
+                <li><strong>About:</strong> Shows information about the application.</li>
+                <li><strong>View README:</strong> Displays the project's README.md file.</li>
+            </ul>
+        </section>
+
+        <!-- Code Structure Section -->
+        <section id="code" class="mb-16">
+            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Code Structure</h2>
+            <p class="text-lg text-gray-300 leading-relaxed mb-6">
+                The project is organized into several key files, separating logic from the user interface.
+            </p>
+
+            <div class="space-y-4">
+                <div class="bg-gray-800 p-5 rounded-lg shadow">
+                    <h4 class="text-xl font-semibold text-white mb-2"><code>main.py</code></h4>
+                    <p class="text-gray-300">
+                        This is the main entry point for the application. It initializes the `QApplication` and the
+                        `EnhancedVideoEditor` main window. It's responsible for creating the menu bar, actions, and
+                        connecting UI signals (like button clicks) to the core logic.
+                    </p>
+                </div>
+                <div class="bg-gray-800 p-5 rounded-lg shadow">
+                    <h4 class="text-xl font-semibold text-white mb-2"><code>view.py</code></h4>
+                    <p class="text-gray-300">
+                        This file contains all the custom PyQt5 UI components (Widgets). It defines the visual elements
+                        of the application, such as the `EditorPanel`, `ProcessingDialog`, `ExportDialog`, and
+                        `KeyboardShortcutsDialog`. It handles the "look and feel" but does not contain the core
+                        processing logic.
+                    </p>
+                </div>
+                <div class="bg-gray-800 p-5 rounded-lg shadow">
+                    <h4 class="text-xl font-semibold text-white mb-2"><code>model.py</code> <span
+                            class="text-sm text-gray-400">(Inferred)</span></h4>
+                    <p class="text-gray-300">
+                        Though not provided, `main.py` imports `EditorCore` from this file. This file likely contains
+                        the application's state and business logic (the "Model" in MVC). It manages the video state,
+                        holds the detection results, and performs the heavy lifting, separate from the UI.
+                    </p>
+                </div>
+                <div class="bg-gray-800 p-5 rounded-lg shadow">
+                    <h4 class="text-xl font-semibold text-white mb-2"><code>utilities.py</code> <span
+                            class="text-sm text-gray-400">(Inferred)</span></h4>
+                    <p class="text-gray-300">
+                        `main.py` imports several helper functions from this file. It likely contains standalone
+                        functions for performing specific tasks, such as `detect_multiple_people_yolov8`,
+                        `PersonTracker`, and `blur_faces_of_person`.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Keyboard Shortcuts Section -->
+        <section id="shortcuts" class="mb-16">
+            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Keyboard Shortcuts</h2>
+            <p class="text-lg text-gray-300 leading-relaxed mb-6">
+                A full list of keyboard shortcuts is available from within the application by navigating to <strong
+                    class="text-blue-400">Edit > Keyboard Shortcuts</strong>.
+            </p>
+            <div class="bg-gray-800 p-5 rounded-lg shadow">
+                <h4 class="text-xl font-semibold text-white mb-2">TODO: Add Quick Reference</h4>
+                <p class="text-gray-300">
+                    You can edit this HTML file to add your most common shortcuts here for quick reference. For example:
+                </p>
+                <ul class="list-disc list-inside space-y-2 text-gray-300 mt-4">
+                    <li><strong class="text-white">Ctrl + O:</strong> Open Video</li>
+                    <li><strong class="text-white">Ctrl + E:</strong> Export Video</li>
+                    <li><strong class="text-white">Spacebar:</strong> Play / Pause</li>
+                </ul>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Scrollspy JavaScript -->
+    <script>
+        document.addEventListener('DOMContentLoaded', (event) => {
+            const sections = document.querySelectorAll('section');
+            const navLinks = document.querySelectorAll('.sidebar-link');
+
+            function changeLinkState() {
+                let index = sections.length;
+
+                while (--index && window.scrollY + 100 < sections[index].offsetTop) { }
+
+                navLinks.forEach((link) => link.classList.remove('active'));
+
+                // Check if a link exists for the current index
+                if (navLinks[index]) {
+                    navLinks[index].classList.add('active');
+                }
+            }
+
+            // Set the first link as active by default
+            if (navLinks.length > 0) {
+                navLinks[0].classList.add('active');
+            }
+
+            // Listen for scroll events
+            window.addEventListener('scroll', changeLinkState);
+            // Run on load
+            changeLinkState();
+        });
+    </script>
+</body>
+
+</html>
