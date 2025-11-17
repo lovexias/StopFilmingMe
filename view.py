@@ -1753,48 +1753,48 @@ class EnhancedEditorPanel(QWidget):
         root.addWidget(card_video)
 
         # --- 2) Detection Settings ---
-        card_detect = CardSection("Detection Settings", container)
+        # card_detect = CardSection("Detection Settings", container)
 
-        # Confidence slider
-        conf_row = QHBoxLayout()
-        conf_row.setSpacing(8)
-        conf_label = QLabel("Confidence:")
-        conf_label.setObjectName("sfField")
+        # # Confidence slider
+        # conf_row = QHBoxLayout()
+        # conf_row.setSpacing(8)
+        # conf_label = QLabel("Confidence:")
+        # conf_label.setObjectName("sfField")
 
-        self.conf_slider = QSlider(Qt.Horizontal)
-        self.conf_slider.setMinimum(30)
-        self.conf_slider.setMaximum(95)
-        self.conf_slider.setSingleStep(1)
-        self.conf_slider.setValue(80)
-        self.conf_val_pill = QLabel("80%")
-        self.conf_val_pill.setObjectName("sfPill")
+        # self.conf_slider = QSlider(Qt.Horizontal)
+        # self.conf_slider.setMinimum(30)
+        # self.conf_slider.setMaximum(95)
+        # self.conf_slider.setSingleStep(1)
+        # self.conf_slider.setValue(80)
+        # self.conf_val_pill = QLabel("80%")
+        # self.conf_val_pill.setObjectName("sfPill")
 
-        def _on_conf_change(v):
-            if hasattr(self, "conf_val_pill"):
-                self.conf_val_pill.setText(f"{v}%")
-        self.conf_slider.valueChanged.connect(_on_conf_change)
+        # def _on_conf_change(v):
+        #     if hasattr(self, "conf_val_pill"):
+        #         self.conf_val_pill.setText(f"{v}%")
+        # self.conf_slider.valueChanged.connect(_on_conf_change)
 
-        conf_row.addWidget(conf_label)
-        conf_row.addWidget(self.conf_slider, 1)
-        conf_row.addWidget(self.conf_val_pill)
-        card_detect.inner_lay.addLayout(conf_row)
+        # conf_row.addWidget(conf_label)
+        # conf_row.addWidget(self.conf_slider, 1)
+        # conf_row.addWidget(self.conf_val_pill)
+        # card_detect.inner_lay.addLayout(conf_row)
 
-        # Frame Skip setting
-        skip_row = QHBoxLayout()
-        skip_row.setSpacing(8)
-        skip_label = QLabel("Frame Skip:")
-        skip_label.setObjectName("sfField")
+        # # Frame Skip setting
+        # skip_row = QHBoxLayout()
+        # skip_row.setSpacing(8)
+        # skip_label = QLabel("Frame Skip:")
+        # skip_label.setObjectName("sfField")
 
-        self.skip_spin = QSpinBox()
-        self.skip_spin.setMinimum(1)
-        self.skip_spin.setMaximum(10)
-        self.skip_spin.setValue(2)
+        # self.skip_spin = QSpinBox()
+        # self.skip_spin.setMinimum(1)
+        # self.skip_spin.setMaximum(10)
+        # self.skip_spin.setValue(2)
 
-        skip_row.addWidget(skip_label)
-        skip_row.addWidget(self.skip_spin, 0, Qt.AlignRight)
-        card_detect.inner_lay.addLayout(skip_row)
+        # skip_row.addWidget(skip_label)
+        # skip_row.addWidget(self.skip_spin, 0, Qt.AlignRight)
+        # card_detect.inner_lay.addLayout(skip_row)
 
-        root.addWidget(card_detect)
+        # root.addWidget(card_detect)
 
         # --- 3) Blur Settings ---
         card_blur = CardSection("Blur Settings", container)
@@ -1933,14 +1933,14 @@ class EnhancedEditorPanel(QWidget):
 
     # All other methods remain the same as original EditorPanel
 
-    def get_detection_params(self):
-        """Return current detection UI knobs in controller-friendly units."""
-        conf_pct = self.conf_slider.value() if hasattr(self, "conf_slider") else 80
-        frame_skip = self.skip_spin.value() if hasattr(self, "skip_spin") else 2
-        return {
-            "confidence": conf_pct / 100.0,   # 0.80 for 80%
-            "frame_skip": int(frame_skip),
-        }  
+    # def get_detection_params(self):
+    #     """Return current detection UI knobs in controller-friendly units."""
+    #     conf_pct = self.conf_slider.value() if hasattr(self, "conf_slider") else 80
+    #     frame_skip = self.skip_spin.value() if hasattr(self, "skip_spin") else 2
+    #     return {
+    #         "confidence": conf_pct / 100.0,   # 0.80 for 80%
+    #         "frame_skip": int(frame_skip),
+    #     }  
 
     def set_video_info(self, rotation_angle, total_frames, fps):
         """Set video information and enable controls"""
