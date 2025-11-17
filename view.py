@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtWidgets import QMessageBox
 
+
 # Premiere Pro Style Colors - Professional Dark Theme
 APP_BG = "#1e1e1e"         # Main background (darker)
 PANEL_BG = "#232323"       # Panel backgrounds
@@ -1231,19 +1232,26 @@ class ModernSlider(QSlider):
 class EnhancedEditorPanel(QWidget):
     """Enhanced version of the original EditorPanel with Premiere Pro styling"""
     
-    # Same signals as original
+     # Same signals as original
     importRequested = pyqtSignal()
     playToggled = pyqtSignal(bool)
     frameChanged = pyqtSignal(int)
     detectRequested = pyqtSignal()
     blurRequested = pyqtSignal(int)
     thumbnailClicked = pyqtSignal(int)
-    gestureItemClicked = pyqtSignal(object)   
+    gestureItemClicked = pyqtSignal(object)
     exportRequested = pyqtSignal()
+
+    # NEW: emitted when a video file is dropped onto the panel
+    fileDropped = pyqtSignal(str)
+
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.core_has_video = False
+        
+        # NEW: allow drag & drop onto the editor
+        self.setAcceptDrops(True)
 
         # Internal state
         self.cap = None
@@ -1684,7 +1692,8 @@ class EnhancedEditorPanel(QWidget):
             
             # Set position and size
             self.highlight_widget.setGeometry(display_x1, display_y1, display_width, display_height)
-            self.highlight_widget.set_bbox(display_x1, display_y1, display_width, display_height)
+            self.highlight_widget.set_bbox(0, 0, display_width, display_height)   # local to the overlay
+
             self.highlight_widget.show()
             
             # Start pulse animation
@@ -1692,6 +1701,43 @@ class EnhancedEditorPanel(QWidget):
             
             # Auto-hide after 4 seconds
             QTimer.singleShot(4000, self.hide_person_highlight)
+
+        # --- Drag & drop support -------------------------------------------------
+    def dragEnterEvent(self, event):
+        """Accept video files dragged from Explorer/Finder."""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if not url.isLocalFile():
+                    continue
+                path = url.toLocalFile()
+                ext = os.path.splitext(path)[1].lower()
+                if ext in (".mp4", ".mov", ".avi", ".mkv", ".m4v"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        # Keep the "copy" cursor while moving over the widget
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        """Emit fileDropped(str) when a video file is dropped."""
+        if not event.mimeData().hasUrls():
+            event.ignore()
+            return
+
+        for url in event.mimeData().urls():
+            if not url.isLocalFile():
+                continue
+            path = url.toLocalFile()
+            ext = os.path.splitext(path)[1].lower()
+            if ext in (".mp4", ".mov", ".avi", ".mkv", ".m4v"):
+                event.acceptProposedAction()
+                self.fileDropped.emit(path)
+                return
+
+        event.ignore()
+
 
     def start_pulse_animation(self):
         """Create a pulsing effect by animating the border width"""
@@ -1726,9 +1772,7 @@ class EnhancedEditorPanel(QWidget):
     #---------------------------------
     def create_enhanced_markers_panel(self, parent_splitter):
         """
-        Professional right sidebar with three cards:
-        Video Properties, Blur Settings, Detected Gestures
-        (Detection Settings panel removed)
+        Professional right sidebar with four cards: Video Properties, Detection Settings, Blur Settings, Detected Gestures
         """
         container = QFrame()
         container.setMinimumWidth(320)
@@ -1754,7 +1798,8 @@ class EnhancedEditorPanel(QWidget):
         self.lbl_dur = card_video.add_label_value("Duration:", "--")
         root.addWidget(card_video)
 
-        # --- 2) Blur Settings (your blur type + strength) ---
+ 
+        # --- 3) Blur Settings ---
         card_blur = CardSection("Blur Settings", container)
 
         # Blur type radio buttons
@@ -1766,17 +1811,15 @@ class EnhancedEditorPanel(QWidget):
         self.rb_pixel = QRadioButton("Pixelate")
         self.rb_solid = QRadioButton("Solid")
         self.rb_gauss.setChecked(True)
-
         self.blur_type_group = QButtonGroup(card_blur)
         self.blur_type_group.addButton(self.rb_gauss, 0)
         self.blur_type_group.addButton(self.rb_pixel, 1)
         self.blur_type_group.addButton(self.rb_solid, 2)
-
         rb_row.addWidget(self.rb_gauss)
         rb_row.addWidget(self.rb_pixel)
         rb_row.addWidget(self.rb_solid)
         rb_row.addStretch(1)
-
+        
         row_bt = QHBoxLayout()
         row_bt.setSpacing(8)
         row_bt.addWidget(blur_type_label)
@@ -1804,7 +1847,7 @@ class EnhancedEditorPanel(QWidget):
 
         root.addWidget(card_blur)
 
-        # --- 3) Detected Gestures ---
+        # --- 4) Detected Gestures ---
         card_g = CardSection("Detected Gestures", container)
         self.gesture_list = QListWidget()
         self.gesture_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -1814,27 +1857,19 @@ class EnhancedEditorPanel(QWidget):
         # Connect gesture list clicks
         self.gesture_list.itemClicked.connect(
             lambda it: self.gestureItemClicked.emit(
-                (
-                    {
-                        "person_id": int(d[0]),
-                        "gesture": str(d[1]),
-                        "frame": int(d[2]),
-                        "bbox": d[3],
-                    }
-                    if isinstance((d := it.data(Qt.UserRole)), (tuple, list)) and len(d) >= 4
-                    else d
-                    if isinstance(d, dict)
-                    else (int(d) if isinstance(d, (int, float)) else self.gesture_list.row(it))
-                )
+                ({"person_id": int(d[0]), "gesture": str(d[1]), "frame": int(d[2]), "bbox": d[3]}
+                if isinstance((d := it.data(Qt.UserRole)), (tuple, list)) and len(d) >= 4 else
+                d if isinstance(d, dict) else
+                (int(d) if isinstance(d, (int, float)) else self.gesture_list.row(it)))
             )
         )
-
+        
         card_g.inner_lay.addWidget(self.gesture_list)
         root.addWidget(card_g)
         root.addStretch(1)
 
         parent_splitter.addWidget(container)
-
+        
         # Set splitter proportions
         try:
             parent_splitter.setStretchFactor(0, 3)  # video
@@ -1842,7 +1877,6 @@ class EnhancedEditorPanel(QWidget):
             parent_splitter.setSizes([900, 400])
         except Exception:
             pass
-
 
     def _on_strength_changed(self, v: int):
         self.blur_strength_value = v
@@ -2170,7 +2204,7 @@ class EnhancedEditorPanel(QWidget):
             pass
         self._dlg_detect = None
 
-        
+
     #EXPORTING
     def start_export_progress(self):
         self._dlg_export = ProcessingDialog(self, "Exporting", "Writing video file…", 100, False)

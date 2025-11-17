@@ -9,7 +9,6 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
 os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-
 import numpy as np
 import sys
 import webbrowser
@@ -17,41 +16,35 @@ import time
 import cv2
 from ultralytics import YOLO
 from PyQt5.QtCore import QUrl
-from moviepy import VideoFileClip
+
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAction, QFileDialog, QMessageBox, QDialog,
-    QListWidgetItem
+    QListWidgetItem  # Add this import
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QElapsedTimer, QSettings
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QElapsedTimer,QSettings
 from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor, QPen, QBrush
 
 from view import KeyboardShortcutsDialog
 from view import EditorPanel, ProcessingDialog, ExportDialog
 from model import EditorCore
 import tempfile, shutil, gc
-
 from utilities import (
     PersonTracker,
     detect_multiple_people_yolov8,
     detect_gesture_in_person_box,
-    blur_faces_of_person,
-    face_bbox_in_person,
+    blur_faces_of_person,   # <-- add this
+    face_bbox_in_person
 )
+
+
+from PyQt5.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QRadioButton, QButtonGroup, QLabel, QSlider
 
 # Add these constants
 DISCOVERY_FRAME_SKIP = 70
 ANALYSIS_FRAME_SKIP = 35
 YOLO_DETECTION_INTERVAL = 10
 GESTURE_DURATION = 3  # seconds
-
-# Initialize ORB and matcher for feature tracking
-orb = cv2.ORB_create(nfeatures=500)
-bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-
-# Load YOLO segmentation model
-yolo_model = YOLO('yolov8m-seg.pt')
-
 
 # ---------------- Workers ----------------
 class BlurPersonWorker(QThread):
@@ -68,11 +61,12 @@ class BlurPersonWorker(QThread):
     def run(self):
         import cv2
 
+        # Open the original video
         cap = cv2.VideoCapture(self.core.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         rotation = getattr(self.core, "rotation_angle", 0)
 
-        # reference bbox for the selected person (from the detection pass)
+        # Look up the reference bbox for this person (from detection pass)
         ref_bbox = None
         for person in getattr(self.core, "detected_people", []):
             if person.get("person_id") == self.sel_pid:
@@ -84,7 +78,9 @@ class BlurPersonWorker(QThread):
             bx1, by1, bx2, by2 = b
             inter_x1, inter_y1 = max(ax1, bx1), max(ay1, by1)
             inter_x2, inter_y2 = min(ax2, bx2), min(ay2, by2)
-            iw, ih = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
+            iw, ih = max(0, inter_x2 - inter_x1), max(0, inter_y1 - inter_y1)
+            iw = max(0, inter_x2 - inter_x1)
+            ih = max(0, inter_y2 - inter_y1)
             inter = iw * ih
             if inter == 0:
                 return 0.0
@@ -97,7 +93,7 @@ class BlurPersonWorker(QThread):
             if not ret:
                 break
 
-            # apply rotation to match the rest of the app
+            # Apply the same rotation as the rest of the app
             if rotation == 90:
                 frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             elif rotation == 180:
@@ -105,10 +101,10 @@ class BlurPersonWorker(QThread):
             elif rotation == 270:
                 frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-            # detect people on this frame
+            # Detect people in this frame
             dets = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
 
-            # robustly pull bboxes whether det is (bbox, mask) or bbox-only
+            # Robustly pull bboxes whether det is (bbox, mask) or bbox
             bboxes = []
             for d in dets:
                 if isinstance(d, (tuple, list)) and len(d) >= 1 and isinstance(d[0], (tuple, list)):
@@ -124,31 +120,32 @@ class BlurPersonWorker(QThread):
                     blur_bbox = None
 
             if blur_bbox is not None:
-                # use cached blurred frame as base if exists, else original
+                # Use cached blurred version as base if exists
                 base = self.core.blurred_cache.get(frame_idx, frame)
 
-                # compute a face bbox inside the person bbox for more precise blur
-                try:
-                    face_bb = face_bbox_in_person(frame, blur_bbox)
-                except Exception:
-                    face_bb = None
-                target_bb = face_bb if face_bb else blur_bbox
+                # Detect face in the *clean* frame, not the blurred one
+                clean_for_face = frame
+                face_bb = face_bbox_in_person(clean_for_face, blur_bbox)
 
                 out = blur_faces_of_person(
                     base,
-                    target_bb,
+                    face_bb,
                     blur_type=self.blur_type,
                     strength=self.blur_strength,
                 )
 
                 self.core.blurred_cache[frame_idx] = out
-                self.core.blurred_frames.add(frame_idx)
+                if frame_idx not in self.core.blurred_frames:
+                    self.core.blurred_frames.append(frame_idx)
 
-            # progress
-            self.progress.emit(int(frame_idx / max(1, total_frames) * 100))
+            if total_frames > 0 and frame_idx % 10 == 0:
+                prog = int(100 * frame_idx / total_frames)
+                self.progress.emit(prog)
 
         cap.release()
+        self.progress.emit(100)
         self.finished.emit()
+
 
 
 class GestureDetectWorker(QThread):
@@ -160,55 +157,59 @@ class GestureDetectWorker(QThread):
         self.core = core
 
     def run(self):
+        # Get video properties
         cap = cv2.VideoCapture(self.core.video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         rotation = self.core.rotation_angle
-
+        
         # First pass: Discover people and detect gestures
         person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
         discovered_people = []
         people_with_gestures = []
-
+        
         # STEP 1: Discover all unique people - Process fewer frames
         sample_frames = range(0, total_frames, DISCOVERY_FRAME_SKIP)
         for frame_count in sample_frames:
             self.progress.emit(int((frame_count / total_frames) * 50))
-
+            
             frame = self.core.get_frame(frame_count)
             if frame is None:
                 continue
-
+                
+            # Add confidence threshold to reduce false detections    
             people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
             if people_detected:
                 current_people = person_tracker.update(frame, people_detected, frame_count)
                 for person_id in current_people:
                     if person_id not in discovered_people:
                         discovered_people.append(person_id)
-
+        
         # STEP 2: Analyze each person for gestures
         if discovered_people:
             frames_per_person = total_frames // len(discovered_people)
             for i, person_id in enumerate(discovered_people):
                 progress = 50 + (i / len(discovered_people) * 50)
                 self.progress.emit(int(progress))
-
+                
+                # Get person data from tracker
                 person_data = person_tracker.tracked_people.get(person_id)
                 if not person_data:
                     continue
-
+                
+                # Only analyze a portion of frames for each person
                 start_frame = max(0, person_data.get('first_seen_frame', 0))
                 end_frame = min(total_frames, start_frame + frames_per_person)
-
+                
                 has_gesture = self._analyze_person_across_entire_video(
-                    person_id,
+                    person_id, 
                     person_tracker,
                     start_frame,
                     end_frame,
                     fps,
                     rotation
                 )
-
+                
                 if has_gesture:
                     frame_idx = person_data.get('first_seen_frame', 0)
                     bbox = person_data.get('bbox')
@@ -217,39 +218,42 @@ class GestureDetectWorker(QThread):
                         'frame': frame_idx,
                         'bbox': bbox
                     })
-
+        
         cap.release()
         self.finished.emit(people_with_gestures)
 
     def _analyze_person_across_entire_video(self, person_id, person_tracker, start_frame, end_frame, fps, rotation):
+        """Analyze a specific person between start_frame and end_frame to detect gestures."""
         for frame_num in range(start_frame, end_frame, ANALYSIS_FRAME_SKIP):
             frame = self.core.get_frame(frame_num)
             if frame is None:
                 continue
-
+            
             people_detected = detect_multiple_people_yolov8(frame)
             if not people_detected:
                 continue
-
+                
             current_people = person_tracker.update(frame, people_detected, frame_num)
             if person_id in current_people:
                 person_data = current_people[person_id]
                 gesture_detected = detect_gesture_in_person_box(
-                    person_data['bbox'],
-                    self.core.cap,
-                    "wave",
-                    fps,
-                    duration_seconds=GESTURE_DURATION
-                )
+                person_data['bbox'],
+                self.core.cap,
+                "wave",
+                fps,
+                duration_seconds=GESTURE_DURATION,
+                rotation_angle=rotation,
+                 )
+
                 if gesture_detected:
                     return True
-
+        
         return False
 
 
 class ExportWorker(QThread):
-    progress = pyqtSignal(int)
-    done = pyqtSignal(bool, str)
+    progress = pyqtSignal(int)         # 0–100
+    done = pyqtSignal(bool, str)       # ok, out_path
 
     def __init__(self, core, out_path):
         super().__init__()
@@ -273,6 +277,7 @@ class MainWindow(QMainWindow):
 
         # Model
         self.core = EditorCore()
+        # Shared tracker across passes for consistent IDs
         self.person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
 
         # View
@@ -289,6 +294,8 @@ class MainWindow(QMainWindow):
         self.editor_panel.thumbnailClicked.connect(self._on_thumbnail_clicked)
         self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
         self.editor_panel.exportRequested.connect(self._on_save_project)
+        self.editor_panel.fileDropped.connect(self._on_file_dropped)
+
 
         # Playback timer
         self.play_timer = QTimer()
@@ -296,19 +303,20 @@ class MainWindow(QMainWindow):
         self.play_start_frame = 0
         self.play_timer.timeout.connect(self._on_timer_tick)
 
-        # Memory monitor
+        # Add memory monitor
         self.memory_timer = QTimer()
         self.memory_timer.timeout.connect(self._check_memory)
         self.memory_timer.start(5000)
 
         self._mem_warned_once = False
-        self._mem_next_warn_ts = 0.0
+        self._mem_next_warn_ts = 0.0  # cooldown gate
+        # persistent “don’t show again”
         self._settings = QSettings("StopFilming", "StopFilmingApp")
         self._mem_warn_suppressed = bool(self._settings.value("memory/warnings_suppressed", False, type=bool))
 
-        # Menu bar styling
-        menubar = self.menuBar()
-        self.menuBar().setStyleSheet("""
+        # Menubar
+        menubar = self.menuBar()  # Add this line to define the menubar
+        self.menuBar().setStyleSheet(""" 
             QMenuBar { background-color: #2D3748; color: #E2E8F0; spacing: 6px; padding: 2px 10px; }
             QMenuBar::item { background: transparent; padding: 4px 12px; }
             QMenuBar::item:selected { background-color: #4FD1C7; color: #1A202C; border-radius: 4px; }
@@ -317,7 +325,7 @@ class MainWindow(QMainWindow):
             QMenu::item:selected { background-color: #4A5568; }
         """)
 
-        # File menu
+        # File
         file_menu = menubar.addMenu("File")
         open_vid_action = QAction("Open Video...", self)
         open_vid_action.setShortcut("Ctrl+O")
@@ -335,19 +343,17 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
-        # Edit menu
+        # Edit
         edit_menu = menubar.addMenu("Edit")
-        undo_action = QAction("Undo", self)
-        undo_action.setShortcut("Ctrl+Z")
-        undo_action.triggered.connect(lambda: None)
-        redo_action = QAction("Redo", self)
-        redo_action.setShortcut("Ctrl+Y")
-        redo_action.triggered.connect(lambda: None)
-        edit_menu.addAction(undo_action)
-        edit_menu.addAction(redo_action)
+        undo_action = QAction("Undo", self); undo_action.setShortcut("Ctrl+Z"); undo_action.triggered.connect(lambda: None)
+        redo_action = QAction("Redo", self); redo_action.setShortcut("Ctrl+Y"); redo_action.triggered.connect(lambda: None)
+        edit_menu.addAction(undo_action); edit_menu.addAction(redo_action)
         edit_menu.addSeparator()
+        #preferences_action = QAction("Preferences...", self)
+        #preferences_action.triggered.connect(self._toggle_appearance)
+        #edit_menu.addAction(preferences_action)
 
-        # View menu
+        # View
         view_menu = menubar.addMenu("View")
         toggle_thumbs_action = QAction("Toggle Thumbnails", self, checkable=True)
         toggle_thumbs_action.setChecked(True)
@@ -363,33 +369,37 @@ class MainWindow(QMainWindow):
         )
         view_menu.addAction(toggle_markers_action)
 
-        # Memory warnings toggle
+        # ---- Add this right after view_menu.addAction(fullscreen_action) ----
+                # ---- Memory warning toggle ----
         self.warn_mem_action = QAction("Warn about Memory Usage", self, checkable=True)
         self.warn_mem_action.setChecked(not self._mem_warn_suppressed)
         self.warn_mem_action.toggled.connect(self._toggle_memory_warnings)
         view_menu.addAction(self.warn_mem_action)
 
-        # Blur settings (defaults)
-        self.blur_type = "gaussian"
-        self.blur_strength = 50
+        # ---- Blur settings (defaults) ----
+        self.blur_type = "gaussian"   # or "pixelate" / "solid"
+        self.blur_strength = 50       # 0–100
         self._wire_blur_controls_from_panel()
 
-        # Fullscreen
+
+
+
+# --------------------------------------------------------------------
+
+
         fullscreen_action = QAction("Fullscreen", self)
         fullscreen_action.setShortcut("F11")
         fullscreen_action.triggered.connect(self._toggle_fullscreen)
         view_menu.addAction(fullscreen_action)
 
-        # Tools menu
+        # Tools
         tools_menu = menubar.addMenu("Tools")
         detect_action = QAction("Detect Gestures", self)
         detect_action.triggered.connect(self.editor_panel.detectRequested.emit)
         tools_menu.addAction(detect_action)
 
         blur_action = QAction("Blur Current Frame", self)
-        blur_action.triggered.connect(
-            lambda: self.editor_panel.blurRequested.emit(self.editor_panel.current_frame_idx)
-        )
+        blur_action.triggered.connect(lambda: self.editor_panel.blurRequested.emit(self.editor_panel.current_frame_idx))
         tools_menu.addAction(blur_action)
 
         export_action = QAction("Export Blurred Video...", self)
@@ -400,37 +410,52 @@ class MainWindow(QMainWindow):
         clear_blurs_action.triggered.connect(self._on_clear_blurs)
         tools_menu.addAction(clear_blurs_action)
 
-        # Help menu
+        # Help
         help_menu = menubar.addMenu("Help")
         about_action = QAction("About StopFilming", self)
         about_action.triggered.connect(self._show_about_dialog)
         help_menu.addAction(about_action)
 
+
+        self.face_ref_for = {}     # pid -> last stable face bbox
+        self.face_miss_for = {}    # pid -> consecutive misses
+
+
+        
+
         shortcuts_action = QAction("Keyboard Shortcuts", self)
         shortcuts_action.triggered.connect(self._show_shortcuts_reference)
         help_menu.addAction(shortcuts_action)
 
-        self._last_blur_profile = (self.blur_type, int(self.blur_strength))
 
-    # ------------------------------------------------------------------
-    # Blur settings handlers – keep UI and state in sync
-    # ------------------------------------------------------------------
+#---------drag and drop----------------
+    def _on_file_dropped(self, path: str):
+            """Handle a video file dropped onto the editor panel."""
+            if not path or not os.path.exists(path):
+                return
+            self._load_video(path)
+
+
+    #for ability to chose the type of blur----------------------------------
+    
+    
     def _on_blur_type_changed(self, t: str):
         self.blur_type = t
+        # also reflect the change in the panel radios if needed
         p = getattr(self, "editor_panel", None)
         if p:
-            if t == "gaussian" and hasattr(p, "rb_gauss"):
-                p.rb_gauss.setChecked(True)
-            elif t == "pixelate" and hasattr(p, "rb_pixel"):
-                p.rb_pixel.setChecked(True)
-            elif t == "solid" and hasattr(p, "rb_solid"):
-                p.rb_solid.setChecked(True)
+            if t == "gaussian" and hasattr(p, "rb_gauss"): p.rb_gauss.setChecked(True)
+            elif t == "pixelate" and hasattr(p, "rb_pixel"): p.rb_pixel.setChecked(True)
+            elif t == "solid" and hasattr(p, "rb_solid"): p.rb_solid.setChecked(True)
 
     def _on_blur_strength_changed(self, v: int):
         self.blur_strength = int(v)
+        # update the pill on the existing right panel
         p = getattr(self, "editor_panel", None)
         if p and hasattr(p, "lbl_strength_pct"):
             p.lbl_strength_pct.setText(f"{int(v)}%")
+
+    #-----------//
 
     def _wire_blur_controls_from_panel(self):
         p = self.editor_panel
@@ -458,25 +483,34 @@ class MainWindow(QMainWindow):
         p.rb_gauss.toggled.connect(lambda c: c and self._on_blur_type_changed("gaussian"))
         p.rb_pixel.toggled.connect(lambda c: c and self._on_blur_type_changed("pixelate"))
         p.rb_solid.toggled.connect(lambda c: c and self._on_blur_type_changed("solid"))
+
+        # reuse your existing handler so everything stays in one place
         p.blur_strength.valueChanged.connect(self._on_blur_strength_changed)
 
-    # ------------------------------------------------------------------
-    # Memory warnings + misc small helpers
-    # ------------------------------------------------------------------
+
+     #///----------------------------------
+
+    
+    #supress memory issues
     def _toggle_memory_warnings(self, enabled: bool):
+        # enabled=True means warnings ON; we store the inverse
         self._mem_warn_suppressed = not enabled
         self._settings.setValue("memory/warnings_suppressed", self._mem_warn_suppressed)
 
+    #cancel blurring
     def _cancelled(self) -> bool:
+        """True if the current ProcessingDialog was X-closed."""
         return bool(getattr(self, "proc", None) and self.proc.was_cancelled())
 
     # ---------- Menus and Controller slots ----------
+    
     def _check_memory(self):
         try:
-            import psutil, gc, time
+            import psutil, time, gc
             memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
 
             if memory_mb > 2048:
+                # light, automatic cleanup
                 if hasattr(self.core, '_frame_cache'):
                     self.core._frame_cache.clear()
                 if hasattr(self.core, 'blurred_cache'):
@@ -489,92 +523,95 @@ class MainWindow(QMainWindow):
             if memory_mb > 4096 and not self._mem_warn_suppressed:
                 now = time.time()
                 if (not self._mem_warned_once) or (now >= self._mem_next_warn_ts):
-                    self._toast(
-                        f"High memory usage detected ({memory_mb:.0f}MB). Continuing… freed caches.",
-                        ms=2500
-                    )
+                    self._toast(f"High memory usage detected ({memory_mb:.0f}MB). Continuing… freed caches.", ms=2500)
                     self._mem_warned_once = True
-                    self._mem_next_warn_ts = now + 120
+                    self._mem_next_warn_ts = now + 120  # 2 min cooldown
 
         except ImportError:
             pass
 
-    def _on_import_requested(self):
-        vid_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Video File",
-            "",
-            "Video Files (*.mp4 *.MP4 *.avi *.AVI *.mov *.MOV);;All Files (*)"
-        )
-        if not vid_path:
-            return
 
-        self.play_timer.stop()
-        try:
-            self.editor_panel.audio_pause()
-        except Exception:
-            pass
 
-        if getattr(self.core, "cap", None) is not None:
+    # ---------- Controller slots ----------
+    def _load_video(self, vid_path: str):
+            if not vid_path:
+                return
+
+            # Stop timers/audio tied to the previous video
+            self.play_timer.stop()
             try:
-                self.core.cap.release()
+                self.editor_panel.audio_pause()
             except Exception:
                 pass
-            self.core.cap = None
 
-        meta = self.core.load_video(vid_path)
+            # Ensure the previous cap is closed before opening a new one
+            if getattr(self.core, "cap", None) is not None:
+                try:
+                    self.core.cap.release()
+                except Exception:
+                    pass
+                self.core.cap = None
 
-        # MoviePy rotation metadata
-        self._moviepy_rotation = self._get_rotation_from_metadata(vid_path)
-        self.core.rotation_angle = self._moviepy_rotation
-        print(f"[IMPORT] MoviePy rotation metadata: {self._moviepy_rotation}°")
+            meta = self.core.load_video(vid_path)
+            old_panel = self.editor_panel
+            if hasattr(old_panel, 'cleanup_audio_resources'):
+                old_panel.cleanup_audio_resources()
+            old_panel.deleteLater()
 
-        old_panel = self.editor_panel
-        if hasattr(old_panel, 'cleanup_audio_resources'):
-            old_panel.cleanup_audio_resources()
-        old_panel.deleteLater()
+            self.editor_panel = EditorPanel()
+            self.setCentralWidget(self.editor_panel)
 
-        self.editor_panel = EditorPanel()
-        self.setCentralWidget(self.editor_panel)
-        self.editor_panel.importRequested.connect(self._on_import_requested)
-        self.editor_panel.playToggled.connect(self._on_play_toggled)
-        self.editor_panel.frameChanged.connect(self._on_frame_changed)
-        self.editor_panel.detectRequested.connect(self._on_detect_requested)
-        self.editor_panel.blurRequested.connect(self._on_blur_requested)
-        self.editor_panel.thumbnailClicked.connect(self._on_thumbnail_clicked)
-        self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
-        self.editor_panel.exportRequested.connect(self._on_save_project)
+            # Re-wire signals
+            self.editor_panel.importRequested.connect(self._on_import_requested)
+            self.editor_panel.playToggled.connect(self._on_play_toggled)
+            self.editor_panel.frameChanged.connect(self._on_frame_changed)
+            self.editor_panel.detectRequested.connect(self._on_detect_requested)
+            self.editor_panel.blurRequested.connect(self._on_blur_requested)
+            self.editor_panel.thumbnailClicked.connect(self._on_thumbnail_clicked)
+            self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
+            self.editor_panel.exportRequested.connect(self._on_save_project)
+            # NEW: handle dropped files on the new panel too
+            self.editor_panel.fileDropped.connect(self._on_file_dropped)
 
-        self._wire_blur_controls_from_panel()
+            self.editor_panel.set_video_info(
+                rotation_angle=meta["rotation_angle"],
+                total_frames=meta["total_frames"],
+                fps=meta["fps"]
+            )
+            self.editor_panel.video_path = self.core.video_path  # sets up audio
 
-        self.editor_panel.set_video_info(
-            rotation_angle=meta["rotation_angle"],
-            total_frames=meta["total_frames"],
-            fps=meta["fps"],
-        )
-        self.editor_panel.video_path = self.core.video_path
+            frame0 = self.core.get_frame(0)
+            if frame0 is not None:
+                frame0 = self._apply_rotation(frame0)
+                self.editor_panel.display_frame(frame0, 0)
 
-        frame0 = self.core.get_frame(0)
-        if frame0 is not None:
-            frame0 = self._apply_rotation(frame0)
-            self.editor_panel.display_frame(frame0, 0)
+            thumbs = self.core.generate_thumbnails(num_thumbs=16)
+            self.editor_panel.add_thumbnails(thumbs)
+            self._wire_blur_controls_from_panel()
 
-        thumbs = self.core.generate_thumbnails(num_thumbs=16)
-        self.editor_panel.add_thumbnails(thumbs)
+            self.setWindowTitle(f"StopFilming — Editing: {vid_path}")
+            screen = QApplication.primaryScreen()
+            rect = screen.availableGeometry()
+            self.showNormal()
+            self.resize(rect.width(), rect.height())
+            self.repaint()
+            QApplication.processEvents()
 
-        self.setWindowTitle(f"StopFilming — Editing: {vid_path}")
-        screen = QApplication.primaryScreen()
-        rect = screen.availableGeometry()
-        self.showNormal()
-        self.resize(rect.width(), rect.height())
-        self.repaint()
-        QApplication.processEvents()
+    def _on_import_requested(self):
+            vid_path, _ = QFileDialog.getOpenFileName(
+                self, "Open Video File", "",
+                "Video Files (*.mp4 *.MP4 *.avi *.AVI *.mov *.MOV);;All Files (*)"
+            )
+            if vid_path:
+                self._load_video(vid_path)
 
+    
     def _toast(self, text: str, title: str = "StopFilming", ms: int = 1500):
         dlg = ProcessingDialog(self, title=title, message=text, total_steps=None)
         dlg.setWindowModality(Qt.NonModal)
         dlg.setWindowFlags(dlg.windowFlags() | Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
 
+        # place near bottom-right of the main window
         parent_geo = self.geometry()
         dlg.adjustSize()
         x = parent_geo.x() + parent_geo.width() - dlg.width() - 24
@@ -600,7 +637,7 @@ class MainWindow(QMainWindow):
         cfg = dlg.result_values()
         out_path = cfg["path"]
         container = (cfg.get("container") or "mp4").lower()
-        codec = (cfg.get("codec") or "mp4v").lower()
+        codec     = (cfg.get("codec") or "mp4v").lower()
 
         if container == "mp4" and codec in ("h264", "avc1", "x264"):
             codec = "mp4v"
@@ -619,21 +656,20 @@ class MainWindow(QMainWindow):
             title="Exporting Video",
             message="Writing output file...",
             total_steps=100,
-            allow_cancel=False,
+            allow_cancel=False,         # usually don't allow cancel for export
             show_cancel_button=False
         )
-        self.proc.setWindowModality(Qt.NonModal)
+        self.proc.setWindowModality(Qt.NonModal)          # <- non-modal
         self.proc.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.proc.show()
         QApplication.processEvents()
 
+
+        
         self.export_thread = ExportWorker(self.core, out_path)
         self.export_thread.progress.connect(
             lambda pct: (getattr(self, "proc", None) and
-                         self.proc.set_progress(
-                             int(max(0, min(100, pct))),
-                             label=f"{int(pct)}%"
-                         ))
+                        self.proc.set_progress(int(max(0, min(100, pct))), label=f"{int(pct)}%"))
         )
 
         def _done(ok, path):
@@ -641,15 +677,17 @@ class MainWindow(QMainWindow):
                 try:
                     self.proc.finish("Export complete" if ok else "Export failed")
                 except Exception:
-                    try:
-                        self.proc.accept()
-                    except Exception:
-                        pass
+                    try: self.proc.accept()
+                    except Exception: pass
                 self.proc = None
 
             if ok:
+                # Non-modal, consistent with detect/blur
                 self._toast(f"Exported to:\n{path}", title="Export Complete", ms=3000)
                 self.statusBar().showMessage(f"Saved: {path}", 7000)
+                # Optional: auto-open folder (Windows)
+                # import os
+                # os.startfile(os.path.dirname(path))
             else:
                 self._toast("Failed to export edited video.", title="Export Failed", ms=3500)
                 self.statusBar().showMessage("Export failed", 7000)
@@ -662,12 +700,18 @@ class MainWindow(QMainWindow):
             self.export_thread = None
 
         self.export_thread.done.connect(_done)
-        self.export_thread.start()
+        self.export_thread.start()  
+
 
     def _on_clear_blurs(self):
         self.core.blurred_frames.clear()
+        # self.core.blurred_cache.clear()  # keep commented if you want preview to persist
         self.editor_panel.clear_markers()
         self.editor_panel.blur_button.setEnabled(False)
+        # also reset face stabilizer memory
+        self.face_ref_for.clear()
+        self.face_miss_for.clear()
+
 
     def _on_play_toggled(self, play: bool):
         if not self.core or not self.core.video_path:
@@ -677,45 +721,39 @@ class MainWindow(QMainWindow):
             if self.core.cap is None or not self.core.cap.isOpened():
                 self.core.cap = cv2.VideoCapture(self.core.video_path, cv2.CAP_FFMPEG)
                 try:
-                    self.core.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    self.core.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Smaller buffer for responsiveness
                 except Exception:
                     pass
 
             start_at = max(0, int(self.editor_panel.current_frame_idx))
             self.core.cap.set(cv2.CAP_PROP_POS_FRAMES, start_at)
+
             self.play_start_frame = start_at
             self.play_clock.start()
 
+            # Calculate proper timer interval based on FPS
             fps = max(1.0, float(self.core.fps))
-            timer_interval = max(8, int(1000.0 / fps / 1.2))
+            # Target slightly higher than FPS for smooth playback
+            timer_interval = max(8, int(1000.0 / fps / 1.2))  # 20% faster than frame rate
+            
             self.play_timer.start(timer_interval)
             self.editor_panel.toggle_button.setText("Pause")
+
             self.editor_panel.audio_play_from_frame(self.editor_panel.current_frame_idx, fps)
         else:
             self.play_timer.stop()
             self.editor_panel.toggle_button.setText("Play")
             self.editor_panel.audio_pause()
 
-    def _get_rotation_from_metadata(self, path):
-        try:
-            clip = VideoFileClip(path)
-            rotation = int(getattr(clip, "rotation", 0) or 0)
-            clip.close()
-            if rotation not in (0, 90, 180, 270):
-                rotation = 0
-        except Exception:
-            rotation = 0
-        return rotation
-
     def _apply_rotation(self, frame):
         if frame is None:
             return None
-        rotation = getattr(self, "_moviepy_rotation", 0)
-        if rotation == 90:
+        ra = getattr(self.core, "rotation_angle", 0) or 0
+        if ra == 90:
             return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif rotation == 180:
+        elif ra == 180:
             return cv2.rotate(frame, cv2.ROTATE_180)
-        elif rotation == 270:
+        elif ra == 270:
             return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         return frame
 
@@ -726,14 +764,15 @@ class MainWindow(QMainWindow):
 
             if self.core.cap is not None:
                 self.core.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-
+            
+            # Check blurred cache first
             if frame_idx in self.core.blurred_cache:
-                img = self.core.blurred_cache[frame_idx].copy()
+                img = self.core.blurred_cache[frame_idx].copy()  # Make a copy to be safe
             else:
                 img = self.core.get_frame(frame_idx)
                 if img is not None:
                     img = self._apply_rotation(img)
-
+            
             if img is not None:
                 self.editor_panel.display_frame(img, frame_idx)
                 self.editor_panel.audio_seek_to_frame(frame_idx, self.core.fps)
@@ -757,7 +796,9 @@ class MainWindow(QMainWindow):
 
         frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
         display_frame = self._apply_rotation(frame)
-
+            
+        # NEW
+        # --- Use blurred frame cache if available ---
         if hasattr(self.core, "blur_cache_dir") and os.path.exists(self.core.blur_cache_dir):
             frame_path = os.path.join(self.core.blur_cache_dir, f"{frame_idx:06d}.jpg")
             if frame_idx in self.core.blurred_cache:
@@ -767,35 +808,48 @@ class MainWindow(QMainWindow):
                 self.core.blurred_cache[frame_idx] = blurred
                 display_frame = blurred
 
+            # Keep cache small (±15 frames around current)
             keys = sorted(self.core.blurred_cache.keys())
             for k in keys:
                 if abs(k - frame_idx) > 15:
                     del self.core.blurred_cache[k]
 
+        # OPTIONAL live preview — apply BEFORE displaying
+        if hasattr(self, "persistent_blur_ids") and getattr(self, "persistent_blur_ids", None) and hasattr(self, "_preview_people"):
+            for pid, pdata in self._preview_people.items():
+                if pid in self.persistent_blur_ids and "bbox" in pdata:
+                    person_bb = tuple(map(int, pdata["bbox"]))
+                    face_bb = face_bbox_in_person(display_frame, person_bb)
+                    display_frame = blur_faces_of_person(
+                        display_frame, face_bb,
+                        blur_type=self.blur_type,
+                        strength=self.blur_strength
+                    )
+
+
+        # Now display
         self.editor_panel.display_frame(display_frame, frame_idx)
         self.editor_panel.current_frame_idx = frame_idx
 
+
+
+
     def _on_detect_requested(self):
+        
         self.editor_panel.start_detect_progress(total_steps=100)
 
+
+        """Optimized gesture detection – stops analyzing a person once any gesture is detected."""
         if not self.core.video_path:
             QMessageBox.information(self, "Detection", "No video loaded.")
             return
+            
 
         video_path = self.core.video_path
         cap = cv2.VideoCapture(video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        try:
-            clip = VideoFileClip(video_path)
-            rotation = int(getattr(clip, "rotation", 0) or 0)
-            clip.close()
-            self._moviepy_rotation = rotation
-            print(f"[DEBUG] MoviePy rotation metadata: {self._moviepy_rotation}°")
-        except Exception:
-            rotation = getattr(self.core, "rotation_angle", 0) or 0
-            self._moviepy_rotation = rotation
-            print(f"[DEBUG] MoviePy rotation metadata: {self._moviepy_rotation}°")
+        rotation = getattr(self.core, "rotation_angle", 0)
         cap.release()
 
         print("=" * 70)
@@ -803,6 +857,11 @@ class MainWindow(QMainWindow):
         print("=" * 70)
         print(f"Video: {video_path}")
         print(f"Total Frames: {total_frames}, FPS: {fps:.2f}, Rotation: {rotation}°")
+
+  
+        
+        #----------//
+
 
         person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
         discovered_people = []
@@ -817,12 +876,19 @@ class MainWindow(QMainWindow):
             if dlg and dlg.was_cancelled():
                 self.editor_panel.finish_detect_progress(False)
                 return
-
             ret, frame = cap.read()
             if not ret:
                 break
 
-            frame = self._apply_rotation(frame)
+
+            # Rotate if needed
+            if rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
             people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
             if people_detected:
                 current_people = person_tracker.update(frame, people_detected, frame_idx)
@@ -833,16 +899,16 @@ class MainWindow(QMainWindow):
 
             progress = int((frame_idx / total_frames) * 40)
             if not self.editor_panel.set_detect_progress(progress, f"Stage 1 – Discovering People: {progress}%"):
+                # user clicked ✖ → cancel
                 self.editor_panel.finish_detect_progress(False)
                 return
-
             self.statusBar().showMessage(f"Discovering people... {progress}%")
             QApplication.processEvents()
 
         cap.release()
         print(f"\n✅ STEP 1 COMPLETE: {len(discovered_people)} people discovered.")
 
-        # STEP 2: Analyze gestures
+               # STEP 2: Analyze gestures
         print("\n🔍 STEP 2: Analyzing gestures (adaptive clarity filter)...")
         gesture_found_for_person = {pid: False for pid in discovered_people}
         unclear_face_for_person = {pid: False for pid in discovered_people}
@@ -850,6 +916,7 @@ class MainWindow(QMainWindow):
         total_to_analyze = len(discovered_people)
         analyzed_count = 0
 
+        # === 🧠 Pre-scan: Estimate average video sharpness & brightness ===
         print("\n📊 Estimating average video clarity...")
         cap = cv2.VideoCapture(video_path)
         sharp_samples, bright_samples = [], []
@@ -867,15 +934,20 @@ class MainWindow(QMainWindow):
         avg_bright = np.mean(bright_samples) if bright_samples else 100
         print(f"📈 Avg sharpness: {avg_sharp:.1f}, Avg brightness: {avg_bright:.1f}")
 
-        sharp_thresh = max(10, avg_sharp * 0.4)
-        bright_thresh = max(25, avg_bright * 0.5)
-        area_thresh = 5000
+        # === 🔧 Adaptive thresholds based on scene ===
+        sharp_thresh = max(10, avg_sharp * 0.4)     # 40% of avg
+        bright_thresh = max(25, avg_bright * 0.5)   # 50% of avg
+        area_thresh = 5000                          # constant minimum box size
         print(f"🔧 Using thresholds → sharpness<{sharp_thresh:.1f}, brightness<{bright_thresh:.1f}, area<{area_thresh}")
+
 
         for gesture_type in gestures_to_check:
             print(f"\n🎯 Checking gesture type: {gesture_type}")
 
+    
+            
             for pid in discovered_people:
+                # Skip if already detected or face unclear
                 if gesture_found_for_person[pid]:
                     print(f"⏭️ Skipping Person {pid} (already has gesture)")
                     continue
@@ -888,6 +960,8 @@ class MainWindow(QMainWindow):
                 cap = cv2.VideoCapture(video_path)
 
                 for frame_num in range(0, total_frames, ANALYSIS_FRAME_SKIP):
+                  
+                    
                     dlg = getattr(self.editor_panel, "_dlg_detect", None)
                     if dlg and dlg.was_cancelled():
                         self.editor_panel.finish_detect_progress(False)
@@ -901,7 +975,14 @@ class MainWindow(QMainWindow):
                     if not ret:
                         break
 
-                    frame = self._apply_rotation(frame)
+                    # Rotate
+                    if rotation == 90:
+                        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                    elif rotation == 180:
+                        frame = cv2.rotate(frame, cv2.ROTATE_180)
+                    elif rotation == 270:
+                        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
                     people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
                     if not people_detected:
                         continue
@@ -912,6 +993,7 @@ class MainWindow(QMainWindow):
                         bbox = person_data["bbox"]
                         x1, y1, x2, y2 = map(int, bbox)
 
+                        # 👇 Adaptive clarity check
                         roi = frame[y1:y2, x1:x2]
                         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
                         sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -925,10 +1007,15 @@ class MainWindow(QMainWindow):
                                 f"(sharp={sharpness:.1f}/{sharp_thresh:.1f}, "
                                 f"bright={brightness:.1f}/{bright_thresh:.1f}) – skipping."
                             )
-                            break
+                            break  # stop analyzing this person
 
                         detected = detect_gesture_in_person_box(
-                            bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION
+                            bbox,
+                            cap,
+                            gesture_type,
+                            fps,
+                            duration_seconds=GESTURE_DURATION,
+                            rotation_angle=rotation,
                         )
                         if detected:
                             gesture_detected = True
@@ -945,16 +1032,14 @@ class MainWindow(QMainWindow):
                 cap.release()
                 analyzed_count += 1
                 progress = max(0, min(100, 40 + int((analyzed_count / total_to_analyze) * 60)))
-                if not self.editor_panel.set_detect_progress(
-                    progress,
-                    f"Stage 2 – Detecting Gestures: {progress}%"
-                ):
+                if not self.editor_panel.set_detect_progress(progress, f"Stage 2 – Detecting Gestures: {progress}%"):
                     self.editor_panel.finish_detect_progress(False)
                     return
-
                 self.statusBar().showMessage(f"Analyzing gestures... {progress}%")
                 QApplication.processEvents()
+                
 
+                # Stop if all people done or skipped
                 all_done = all(
                     gesture_found_for_person[pid] or unclear_face_for_person[pid]
                     for pid in discovered_people
@@ -969,6 +1054,7 @@ class MainWindow(QMainWindow):
             ):
                 break
 
+        # Merge duplicates
         unique_people = {p["person_id"]: p for p in people_to_blur}
         people_to_blur = list(unique_people.values())
 
@@ -976,6 +1062,7 @@ class MainWindow(QMainWindow):
         print(f"- Total people with gestures: {len(people_to_blur)}")
         print(f"- IDs: {[p['person_id'] for p in people_to_blur]}")
 
+        # Update UI
         self.editor_panel.gesture_list.clear()
         for p in people_to_blur:
             item = QListWidgetItem(f"Person {p['person_id']} - {p['gesture'].title()}")
@@ -985,72 +1072,90 @@ class MainWindow(QMainWindow):
         has_items = self.editor_panel.gesture_list.count() > 0
         self.editor_panel.blur_button.setEnabled(has_items)
         self.statusBar().showMessage(f"Detected {len(people_to_blur)} gesture(s)")
+     
 
         self.people_to_blur = people_to_blur
         self.person_tracker = person_tracker
         print("=" * 70)
         print("PASS 1 COMPLETE — Ready for blurring.")
         print("=" * 70)
+        # After you’ve updated the UI with results…
         self.editor_panel.finish_detect_progress(True)
+
+
+
 
     def _on_blur_requested(self, _frame_idx_from_button: int):
         """Blur the selected person and keep all previously blurred people persistent."""
         import tempfile, gc, cv2, os
 
+        # Ensure gesture detections exist
+        # (A) No detected gestures
         if not hasattr(self, "people_to_blur") or not self.people_to_blur:
             self._toast("No detected gestures found.", title="Blur – StopFilming")
             return
 
+        # (B) No selection
         selected_items = self.editor_panel.gesture_list.selectedItems()
         if not selected_items:
             self._toast("Select one or more people from the list.", title="Blur – StopFilming")
             return
 
-        selected_pairs = []
+        # Collect selected IDs (+ seed bboxes if available from the item)
+        selected_pairs = []  # list[(pid, bbox or (0,0,0,0))]
         for it in selected_items:
             data = it.data(Qt.UserRole) or {}
             if "person_id" in data:
                 pid = int(data["person_id"])
-                bb = tuple(map(int, data.get("bbox", (0, 0, 0, 0))))
+                bb  = tuple(map(int, data.get("bbox", (0,0,0,0))))
                 selected_pairs.append((pid, bb))
 
         selected_ids = [pid for pid, _ in selected_pairs]
         print(f"🎯 Selected people for blurring: IDs {selected_ids}")
 
+        # --- take a snapshot of the IDs that were already baked into the cache ---
         prev_ids = set(getattr(self, "persistent_blur_ids", set()))
 
+        # ensure the persistent set exists, then add the user’s new selections
         if not hasattr(self, "persistent_blur_ids"):
             self.persistent_blur_ids = set()
         self.persistent_blur_ids.update(selected_ids)
 
+        # these are the *new* people to blur in this pass
         new_ids = set(self.persistent_blur_ids) - prev_ids
 
         print(f"Prev IDs: {sorted(prev_ids)}")
         print(f"Selected IDs this pass: {sorted(selected_ids)}")
         print(f"New IDs to blur this pass: {sorted(new_ids)}")
 
-        # Decide whether to re-render from clean frames or build on cached frames,
-        # based on blur profile changing or overlapping IDs
+
+        # --- Decide whether to re-render from clean frames or build on cached frames ---
+        # Re-render if: (1) blur type/strength changed since last run, or (2) you're re-blurring any already-blurred IDs
         last_profile = getattr(self, "_last_blur_profile", None)
         current_profile = (self.blur_type, int(self.blur_strength))
 
         changed_profile = (last_profile is not None) and (current_profile != last_profile)
-        has_existing_overlap = len(set(selected_ids) & prev_ids) > 0
+        has_existing_overlap = len(set(selected_ids) & prev_ids) > 0 # any already-blurred IDs selected/persistent
 
         re_render_all = changed_profile or has_existing_overlap
+
+        # We will blur either all persistent IDs (clean re-render) or only the new IDs (incremental)
         ids_to_apply = set(self.persistent_blur_ids) if re_render_all else set(new_ids)
 
-        print(f"🧠 Re-render all from clean frames? {re_render_all}")
-        print(f"IDs that will be (re)applied this pass: {sorted(ids_to_apply)}")
+        print(f"Re-render all from clean frame? {re_render_all} (profile_changed={changed_profile}, overlap={has_existing_overlap})")
+        print(f"IDs to apply this pass: {sorted(ids_to_apply)}")
 
-        import shutil
+
+        #BLUR- CANCEL-----------//
+        # --- Staging so we can roll back on cancel ---
+        import tempfile, shutil
         cancelled = False
-        staged_cache = {}
-        if not hasattr(self.core, "blur_cache_dir"):
-            self.core.blur_cache_dir = tempfile.mkdtemp(prefix="blur_cache_")
-        cache_dir = self.core.blur_cache_dir
-        run_dir = os.path.join(cache_dir, f"run_{int(time.time())}")
+        staged_cache = {}  # frame_idx -> blurred frame (RAM)
+        run_dir = os.path.join(self.core.blur_cache_dir if hasattr(self.core, "blur_cache_dir") else tempfile.mkdtemp(prefix="blur_cache_"),
+                            f"run_{int(time.time())}")
         os.makedirs(run_dir, exist_ok=True)
+
+
 
         def _iou(a, b):
             ax1, ay1, ax2, ay2 = a
@@ -1059,17 +1164,17 @@ class MainWindow(QMainWindow):
             inter_x2, inter_y2 = min(ax2, bx2), min(ay2, by2)
             iw, ih = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
             inter = iw * ih
-            if inter <= 0:
-                return 0.0
-            area_a = (ax2 - ax1) * (ay2 - ay1)
-            area_b = (bx2 - bx1) * (by2 - by1)
+            if inter <= 0: return 0.0
+            area_a = (ax2-ax1)*(ay2-ay1); area_b = (bx2-bx1)*(by2-by1)
             return inter / float(area_a + area_b - inter + 1e-6)
 
+        # Create the persistent set if not already
         if not hasattr(self, "persistent_blur_ids"):
             self.persistent_blur_ids = set()
         for pid in selected_ids:
             self.persistent_blur_ids.add(pid)
         print(f"🧩 Current persistent blur IDs: {sorted(self.persistent_blur_ids)}")
+
 
         video_path = self.core.video_path
         cap = cv2.VideoCapture(video_path)
@@ -1080,10 +1185,26 @@ class MainWindow(QMainWindow):
         self.editor_panel.start_blur_progress()
         QApplication.processEvents()
 
-        print(f"📁 Using cache directory: {cache_dir}")
-        print(f"Blurring all persistent Person IDs (base): {self.persistent_blur_ids}")
-        print(f"Re-render all from clean frames? {re_render_all}")
+        # Reuse or create disk cache
+        # NEW (cache lives on the core so export can see it)
+        if not hasattr(self.core, "blur_cache_dir"):
+            self.core.blur_cache_dir = tempfile.mkdtemp(prefix="blur_cache_")
+        cache_dir = self.core.blur_cache_dir
 
+
+        # --- staging so we can cancel/rollback cleanly ---
+        cancelled = False
+        staged_cache = {}  # frame_idx -> blurred frame (RAM)
+        run_dir = os.path.join(cache_dir, f"run_{int(time.time())}")
+        os.makedirs(run_dir, exist_ok=True)
+
+
+        print(f"📁 Using cache directory: {cache_dir}")
+
+       #self.core.blurred_cache.clear()
+        print(f"Blurring all persistent Person IDs: {self.persistent_blur_ids}")
+
+        # Reset tracker disappeared counts
         for pid in self.person_tracker.tracked_people:
             self.person_tracker.tracked_people[pid]["disappeared"] = 0
 
@@ -1091,20 +1212,26 @@ class MainWindow(QMainWindow):
         last_tracked_people = {}
         frame_idx = 0
 
+        
+       
+        # per-person reference bboxes (one time per call)
         if not hasattr(self, "ref_bbox_for"):
             self.ref_bbox_for = {}
 
-        seed_map = {pid: bb for pid, bb in selected_pairs}
+        seed_map = {pid: bb for pid, bb in selected_pairs}  # you already have this
         for pid in self.persistent_blur_ids:
-            if pid not in self.ref_bbox_for or self.ref_bbox_for[pid] == (0, 0, 0, 0):
+            if pid not in self.ref_bbox_for or self.ref_bbox_for[pid] == (0,0,0,0):
                 pdata = self.person_tracker.tracked_people.get(pid, {})
                 self.ref_bbox_for[pid] = seed_map.get(
                     pid,
-                    tuple(map(int, pdata.get("bbox", (0, 0, 0, 0))))
+                    tuple(map(int, pdata.get("bbox", (0,0,0,0))))
                 )
 
+
+
         def _best_match_bbox(ref_bb, current_people_dict):
-            if ref_bb == (0, 0, 0, 0) or not current_people_dict:
+            """Return (pid, bbox, iou) of best match against ref_bb with small IoU gate."""
+            if ref_bb == (0,0,0,0) or not current_people_dict:
                 return None, None, 0.0
             best_pid, best_bb, best_iou = None, None, 0.0
             for pid, pdata in current_people_dict.items():
@@ -1113,14 +1240,47 @@ class MainWindow(QMainWindow):
                 if i > best_iou:
                     best_pid, best_bb, best_iou = pid, bb, i
             return best_pid, best_bb, best_iou
+        
+        # --- face-box helpers (local) ---
+        def bbox_iou(a, b):
+            # just delegate to the IoU helper you already defined above
+            return _iou(a, b)
+
+        def expand_bbox(bb, W, H, pad=0.10):
+            x1, y1, x2, y2 = map(int, bb)
+            w = x2 - x1
+            h = y2 - y1
+            dx = int(w * pad)
+            dy = int(h * pad)
+            nx1 = max(0, x1 - dx)
+            ny1 = max(0, y1 - dy)
+            nx2 = min(W, x2 + dx)
+            ny2 = min(H, y2 + dy)
+            if nx2 <= nx1 + 1: nx2 = min(W, nx1 + 2)
+            if ny2 <= ny1 + 1: ny2 = min(H, ny1 + 2)
+            return (nx1, ny1, nx2, ny2)
+
+        def lerp_boxes(a, b, alpha=0.3):
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            def L(u, v): return int(round((1 - alpha) * u + alpha * v))
+            return (L(ax1, bx1), L(ay1, by1), L(ax2, bx2), L(ay2, by2))
+
 
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            frame = self._apply_rotation(frame)
+            # Apply rotation
+            if rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
+            # Run YOLO every N frames
             if frame_idx % detection_interval == 0:
                 people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
                 if people_detected:
@@ -1131,11 +1291,14 @@ class MainWindow(QMainWindow):
             else:
                 current_people = last_tracked_people.copy()
 
+            # Use previously blurred frame as the base if it exists, so older blurs persist.
+            # Choose base frame depending on render mode
             frame_path = os.path.join(cache_dir, f"{frame_idx:06d}.jpg")
-
             if re_render_all:
+                # Always start clean; we will re-apply blur for all persistent IDs
                 base = frame.copy()
             else:
+                # Incremental: reuse cached base if available, else clean
                 if os.path.exists(frame_path):
                     base = cv2.imread(frame_path)
                 else:
@@ -1143,57 +1306,84 @@ class MainWindow(QMainWindow):
 
             blurred_frame = base
 
+           # Blur only the NEW people for this pass; old ones are already in 'base'
             for pid in list(ids_to_apply):
-                ref_bb = self.ref_bbox_for.get(pid, (0, 0, 0, 0))
+                ref_bb = self.ref_bbox_for.get(pid, (0,0,0,0))
                 match_pid, match_bb, match_iou = _best_match_bbox(ref_bb, current_people)
 
-                if (match_bb is None or match_iou < 0.02) and current_people and ref_bb != (0, 0, 0, 0):
+                # fallback: nearest center if IoU small
+                if (match_bb is None or match_iou < 0.02) and current_people and ref_bb != (0,0,0,0):
                     (rx1, ry1, rx2, ry2) = ref_bb
-                    rcx, rcy = (rx1 + rx2) / 2.0, (ry1 + ry2) / 2.0
-
+                    rcx, rcy = (rx1+rx2)/2.0, (ry1+ry2)/2.0
                     def _center(b):
-                        x1, y1, x2, y2 = b
-                        return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
-
-                    best = None
-                    best_d = 1e18
+                        x1,y1,x2,y2 = b; return ((x1+x2)/2.0, (y1+y2)/2.0)
+                    best = None; best_d = 1e18
                     for _, pdata in current_people.items():
                         b = tuple(map(int, pdata["bbox"]))
-                        cx, cy = _center(b)
-                        d = (cx - rcx) ** 2 + (cy - rcy) ** 2
-                        if d < best_d:
-                            best, best_d = b, d
+                        cx, cy = _center(b); d = (cx-rcx)**2 + (cy-rcy)**2
+                        if d < best_d: best, best_d = b, d
                     match_bb = best
 
                 if match_bb is not None:
-                    # use face_bbox_in_person for tighter blur region
-                    try:
-                        face_bb = face_bbox_in_person(frame, match_bb)
-                    except Exception:
-                        face_bb = None
+                # detect face on a clean frame (not already blurred),
+                    # 'frame' is the raw current frame right above
+                    face_bb = face_bbox_in_person(frame, match_bb)
 
-                    target_bb = face_bb if face_bb else match_bb
+                    # --- STABILIZE THE FACE BOX PER PERSON ---
+                    H, W = frame.shape[:2]
+                    prev = self.face_ref_for.get(pid)
 
+                    if prev is not None:
+                        if bbox_iou(prev, face_bb) < 0.30:
+                            # treat as a miss; only switch after a few consistent misses
+                            misses = self.face_miss_for.get(pid, 0) + 1
+                            self.face_miss_for[pid] = misses
+                            if misses < 3:
+                                face_bb = prev
+                            else:
+                                self.face_ref_for[pid] = face_bb
+                                self.face_miss_for[pid] = 0
+                        else:
+                            # optional smoothing to reduce jitter
+                            # face_bb = lerp_boxes(prev, face_bb, 0.3)
+                            self.face_ref_for[pid] = face_bb
+                            self.face_miss_for[pid] = 0
+                    else:
+                        self.face_ref_for[pid] = face_bb
+                        self.face_miss_for[pid] = 0
+
+                    # pad the box slightly to hide tiny shifts
+                    face_bb = expand_bbox(face_bb, W, H, pad=0.10)
+
+                    # finally blur
                     blurred_frame = blur_faces_of_person(
-                        blurred_frame,
-                        target_bb,
+                        blurred_frame, face_bb,
                         blur_type=self.blur_type,
-                        strength=int(self.blur_strength),
+                        strength=self.blur_strength
                     )
 
+                    # keep updating the person (body) ref bbox too
                     self.ref_bbox_for[pid] = match_bb
 
+
+
+            # Save blurred frame to cache
+            # --- stage write (do NOT touch the real cache yet) ---
             frame_path_stage = os.path.join(run_dir, f"{frame_idx:06d}.jpg")
             cv2.imwrite(frame_path_stage, blurred_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             staged_cache[frame_idx] = blurred_frame
 
+            # progress
             self.editor_panel.set_blur_progress(int((frame_idx / total_frames) * 100))
 
+            # cancel?
             dlg = getattr(self.editor_panel, "_dlg_blur", None)
             if dlg is not None and dlg.was_cancelled():
                 cancelled = True
                 break
 
+
+            # Progress feedback
             if frame_idx % 50 == 0:
                 progress = int((frame_idx / total_frames) * 100)
                 self.editor_panel.set_blur_progress(progress)
@@ -1207,10 +1397,12 @@ class MainWindow(QMainWindow):
 
             frame_idx += 1
 
+
         cap.release()
         gc.collect()
 
         if cancelled:
+            # rollback to pre-click state
             self.persistent_blur_ids = set(prev_ids)
             try:
                 shutil.rmtree(run_dir, ignore_errors=True)
@@ -1221,6 +1413,7 @@ class MainWindow(QMainWindow):
             self._toast("Blur cancelled. No changes applied.", title="Blur – StopFilming")
             return
         else:
+            # commit: move staged files into the real cache, then merge in-memory
             for name in os.listdir(run_dir):
                 src = os.path.join(run_dir, name)
                 dst = os.path.join(cache_dir, name)
@@ -1235,6 +1428,14 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+
+            #ram issues deletee
+            #for idx, img in staged_cache.items():
+               # self.core.blurred_cache[idx] = img
+                #self.core.blurred_frames.add(idx)
+
+
+        # --- UI updates (multi-select safe) ---
         print(f"\n🎉 COMPLETE! Persistent blur IDs now: {sorted(self.persistent_blur_ids)}")
         print(f"Frames stored in cache: {cache_dir}")
 
@@ -1244,9 +1445,11 @@ class MainWindow(QMainWindow):
             f"Blurring updated for {len(self.persistent_blur_ids)} person(s)"
         )
 
+        # Build a friendly list of the just-processed IDs
         try:
-            sel_str = ", ".join(map(str, selected_ids))
+            sel_str = ", ".join(map(str, selected_ids))  # selected_ids was created earlier
         except NameError:
+            # Fallback if the name ever changes
             sel_str = "selected people"
 
         self._toast(
@@ -1261,24 +1464,30 @@ class MainWindow(QMainWindow):
 
         self._last_blur_profile = (self.blur_type, int(self.blur_strength))
 
+
+
     def _on_gesture_detection_finished(self, people_with_gestures):
+        """Handle completion of gesture detection."""
+        # Close the processing dialog first
         if hasattr(self, "proc"):
             self.proc = None
 
+        # Convert dictionary format to tuple format expected by sorting
         segment_starts = [
-            (
-                person_data['person_id'],
-                "wave",
-                person_data['frame'],
-                person_data['bbox']
-            )
+            (person_data['person_id'], 
+             "wave", 
+             person_data['frame'],
+             person_data['bbox']) 
             for person_data in people_with_gestures
         ]
-
+        
+        # Sort by frame number
         segment_starts = sorted(segment_starts, key=lambda s: s[2])
-
+        
+        # Clear existing items
         self.editor_panel.gesture_list.clear()
-
+        
+        # Add detected gestures to UI
         for person_id, gesture, frame, bbox in segment_starts:
             item = QListWidgetItem(f"Person {person_id} - Frame {frame}")
             item.setData(Qt.UserRole, {
@@ -1296,10 +1505,10 @@ class MainWindow(QMainWindow):
         self.play_timer.stop()
         self.editor_panel.toggle_button.setText("Play")
         img = self.core.get_frame(frame_idx)
-        img = self._apply_rotation(img)
         self.editor_panel.display_frame(img, frame_idx)
         self.editor_panel.blur_button.setEnabled(True)
 
+    #------highlight
     def _on_gesture_item_clicked(self, payload):
         pid, gest, bbox = "?", "", None
 
@@ -1338,15 +1547,19 @@ class MainWindow(QMainWindow):
             finally:
                 sld.blockSignals(False)
 
+        # Jump to the frame
         self._on_frame_changed(frame_idx)
 
+        # Highlight the person if we have a bounding box
         if bbox:
+            # Apply rotation to bbox if needed before highlighting
             if hasattr(self.core, 'rotation_angle') and self.core.rotation_angle != 0:
+                # Get the frame to determine dimensions after rotation
                 frame = self.core.get_frame(frame_idx)
                 if frame is not None:
                     h, w = frame.shape[:2]
                     bbox = self._rotate_bbox(bbox, w, h, self.core.rotation_angle)
-
+            
             self.editor_panel.highlight_person_on_frame(bbox)
 
         if gest:
@@ -1354,34 +1567,41 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Selected Person {pid} • {gest} @ frame {frame_idx}")
 
     def _rotate_bbox(self, bbox, width, height, rotation):
+        """Rotate bounding box coordinates to match rotated frame"""
         x1, y1, x2, y2 = bbox
-
+        
         if rotation == 90:
+            # 90° clockwise rotation
             new_x1 = y1
             new_y1 = width - x2
             new_x2 = y2
             new_y2 = width - x1
             return (new_x1, new_y1, new_x2, new_y2)
         elif rotation == 180:
+            # 180° rotation
             new_x1 = width - x2
             new_y1 = height - y2
             new_x2 = width - x1
             new_y2 = height - y1
             return (new_x1, new_y1, new_x2, new_y2)
         elif rotation == 270:
+            # 270° clockwise (90° counter-clockwise)
             new_x1 = height - y2
             new_y1 = x1
             new_x2 = height - y1
             new_y2 = x2
             return (new_x1, new_y1, new_x2, new_y2)
-
-        return bbox
+        
+        return bbox  # No rotation
 
     # ---------- misc ----------
     def _open_documentation(self):
         webbrowser.open(self._docs_local_url())
 
+    
     def _docs_local_url(self):
+        
+        # Prefer local docs next to the app (works with PyInstaller too)
         base = os.path.dirname(os.path.abspath(sys.argv[0]))
         candidates = [
             os.path.join(base, "docs", "index.html"),
@@ -1393,20 +1613,24 @@ class MainWindow(QMainWindow):
             if os.path.exists(p):
                 return QUrl.fromLocalFile(p).toString()
 
+        # Optional override via env var if you host it later:
         import os as _os
         url = _os.environ.get("STOPFILMING_DOCS_URL")
         if url:
             return url
 
+        # Final fallback (anything you like)
         return "https://example.com/stopfilming/docs"
 
+
     def _check_for_updates(self):
-        QMessageBox.information(self, "Check for Updates", "No updates available.")
+        QMessageBox.information(self, "Check for Updates", "No updates available.") 
+
 
     def _show_shortcuts_reference(self):
         dlg = KeyboardShortcutsDialog(self)
         dlg.exec_()
-
+    
     def _show_quick_help(self):
         try:
             from view import HelpDialog
@@ -1421,7 +1645,9 @@ class MainWindow(QMainWindow):
             dlg = AboutDialog(self, version="v1.0", year="2025")
             dlg.exec_()
         except Exception as e:
+            # Fallback to a plain message box if something goes wrong
             QMessageBox.information(self, "About StopFilming", f"StopFilming v1.0\n© 2025\n\n{e}")
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1431,20 +1657,25 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+    
 
     def _show_documentation(self):
+        """
+        Finds and opens documentation.html in the user's default browser.
+        """
         try:
+            # Find the path relative to the main.py script
+            # (Your main.py already imports os and sys)
             base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
             doc_path = os.path.join(base_dir, "documentation.html")
 
             if os.path.exists(doc_path):
+                # Open the file in the default web browser
+                # (Your main.py already imports webbrowser)
                 webbrowser.open(f"file:///{os.path.abspath(doc_path)}")
             else:
-                QMessageBox.warning(
-                    self,
-                    "Documentation Not Found",
-                    f"Could not find documentation.html in the application directory:\n{base_dir}"
-                )
+                QMessageBox.warning(self, "Documentation Not Found",
+                                    f"Could not find documentation.html in the application directory:\n{base_dir}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred while opening documentation:\n{e}")
 
