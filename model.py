@@ -210,64 +210,72 @@ class EditorCore:
         if not os.path.exists(video_path):
             raise IOError(f"Video not found: {video_path}")
 
+        # Close any previous video
         self.close_video()
         self.video_path = video_path
-        self.cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
 
+        # Open with FFMPEG backend when available
+        self.cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
         if not self.cap.isOpened():
             raise IOError("Could not open video. File may be corrupt or unsupported.")
 
+        # Small buffer for responsiveness
         try:
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
         except Exception:
             pass
 
+        # Rotation from metadata (utilities.get_video_rotation)
         try:
             self.rotation_angle = get_video_rotation(video_path)
         except Exception:
             self.rotation_angle = 0
 
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-
-        # --- corrected FPS handling ---
-        fps_raw = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        self.fps = self._validate_fps(fps_raw)
-        print(f"Video FPS: raw={fps_raw}, validated={self.fps}")
-        # --------------------------------
-        
-
-        self.src_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
-        self.src_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
-
+        # Total frames
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         if self.total_frames <= 0:
             self.cap.release()
             self.cap = None
             raise IOError("Video has no readable frames (possibly partial or corrupt).")
 
-        # Reset blur state
-        self.blurred_frames.clear()
-        self.blurred_cache.clear()
-
-
-        # DEBUG: Check what FPS values we're getting
+        # --- FPS handling + debug ---
         fps_raw = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
         fps_validated = self._validate_fps(fps_raw)
-        
-        print(f"=== FPS DEBUG ===")
+        self.fps = fps_validated
+
+        print("=== FPS DEBUG ===")
         print(f"Raw FPS from video: {fps_raw}")
         print(f"Validated FPS: {fps_validated}")
         print(f"Total frames: {self.total_frames}")
         print(f"Calculated duration: {self.total_frames / fps_validated:.2f}s")
         print("================")
-        
-        self.fps = fps_validated
-        
 
+        # --- Source resolution (width / height) ---
+        self.src_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        self.src_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+
+        # Fallback: if metadata failed, read first frame
+        if not self.src_w or not self.src_h:
+            ok, frame0 = self.cap.read()
+            if ok and frame0 is not None:
+                h, w = frame0.shape[:2]
+                self.src_w, self.src_h = w, h
+            # seek back to start after peek
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        # Reset blur state when a new video is loaded
+        self.blurred_frames.clear()
+        self.blurred_cache.clear()
+
+        # Meta dictionary for the UI
         return {
-            "rotation_angle": self.rotation_angle,
             "total_frames": self.total_frames,
-            "fps": self.fps
+            "fps": self.fps,
+            "rotation_angle": self.rotation_angle,
+            "width": self.src_w,
+            "height": self.src_h,
         }
+
 
 
     # ────────────────────────────────────────────────────────────────

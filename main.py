@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAction, QFileDialog, QMessageBox, QDialog,
     QListWidgetItem  # Add this import
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QElapsedTimer,QSettings
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QElapsedTimer, QSettings, pyqtSlot
 from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor, QPen, QBrush
 
 from view import KeyboardShortcutsDialog
@@ -149,70 +149,83 @@ class GestureDetectWorker(QThread):
         self.core = core
 
     def run(self):
-        # Get video properties
-        cap = cv2.VideoCapture(self.core.video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        rotation = self.core.rotation_angle
-        
-        # First pass: Discover people and detect gestures
-        person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
-        discovered_people = []
-        people_with_gestures = []
-        
-        # STEP 1: Discover all unique people - Process fewer frames
-        sample_frames = range(0, total_frames, DISCOVERY_FRAME_SKIP)
-        for frame_count in sample_frames:
-            self.progress.emit(int((frame_count / total_frames) * 50))
+        import cv2
+        if not self.core.video_path:
+            self.finished.emit()
+            return
             
-            frame = self.core.get_frame(frame_count)
+        total_frames = self.core.total_frames
+        if total_frames <= 0:
+            # Try to get it again if core wasn't ready
+            try:
+                cap_temp = cv2.VideoCapture(self.core.video_path)
+                total_frames = int(cap_temp.get(cv2.CAP_PROP_FRAME_COUNT))
+                cap_temp.release()
+            except Exception:
+                total_frames = 0
+        
+        if total_frames <= 0:
+            print("BlurWorker Error: Could not get total frames.")
+            self.finished.emit()
+            return
+        # --- END REPLACED ---
+
+        # reference bbox for the selected person (from the detection pass)
+        ref_bbox = None
+        for person in getattr(self.core, "detected_people", []):
+            if person.get("person_id") == self.sel_pid:
+                ref_bbox = person.get("bbox")
+                break
+
+        def iou(a, b):
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            inter_x1, inter_y1 = max(ax1, bx1), max(ay1, by1)
+            inter_x2, inter_y2 = min(ax2, bx2), min(ay2, by2)
+            iw, ih = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
+            inter = iw * ih
+            if inter == 0: return 0.0
+            area_a = (ax2 - ax1) * (ay2 - ay1)
+            area_b = (bx2 - bx1) * (by2 - bY1)
+            return inter / float(area_a + area_b - inter + 1e-6)
+
+        for frame_idx in range(total_frames):
+            
+ 
             if frame is None:
                 continue
-                
-            # Add confidence threshold to reduce false detections    
-            people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-            if people_detected:
-                current_people = person_tracker.update(frame, people_detected, frame_count)
-                for person_id in current_people:
-                    if person_id not in discovered_people:
-                        discovered_people.append(person_id)
-        
-        # STEP 2: Analyze each person for gestures
-        if discovered_people:
-            frames_per_person = total_frames // len(discovered_people)
-            for i, person_id in enumerate(discovered_people):
-                progress = 50 + (i / len(discovered_people) * 50)
-                self.progress.emit(int(progress))
-                
-                # Get person data from tracker
-                person_data = person_tracker.tracked_people.get(person_id)
-                if not person_data:
-                    continue
-                
-                # Only analyze a portion of frames for each person
-                start_frame = max(0, person_data.get('first_seen_frame', 0))
-                end_frame = min(total_frames, start_frame + frames_per_person)
-                
-                has_gesture = self._analyze_person_across_entire_video(
-                    person_id, 
-                    person_tracker,
-                    start_frame,
-                    end_frame,
-                    fps,
-                    rotation
-                )
-                
-                if has_gesture:
-                    frame_idx = person_data.get('first_seen_frame', 0)
-                    bbox = person_data.get('bbox')
-                    people_with_gestures.append({
-                        'person_id': person_id,
-                        'frame': frame_idx,
-                        'bbox': bbox
-                    })
-        
-        cap.release()
-        self.finished.emit(people_with_gestures)
+      
+            
+            dets = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+
+            # robustly pull bboxes whether det is (bbox, mask) or bbox
+            bboxes = []
+            for d in dets:
+                if isinstance(d, (tuple, list)) and len(d) >= 1 and isinstance(d[0], (tuple, list)):
+                    bb = d[0]
+                else:
+                    bb = d
+                bboxes.append(tuple(map(int, bb)))
+
+            blur_bbox = None
+            if ref_bbox and bboxes:
+                blur_bbox = max(bboxes, key=lambda bb: iou(ref_bbox, bb))
+                if iou(ref_bbox, blur_bbox) < 0.05:
+                    blur_bbox = None
+
+            if blur_bbox is not None:
+                # AFTER
+                base = self.core.blurred_cache.get(frame_idx, frame)
+                # Use core wrapper so UI-driven blur settings apply
+                out  = self.core.apply_blur_to_frame(base, blur_bbox)
+                self.core.blurred_cache[frame_idx] = out
+                self.core.blurred_frames.add(frame_idx)
+
+            # progress
+            self.progress.emit(int(frame_idx / max(1, total_frames) * 100))
+
+        # cap.release() # <-- This was removed
+        self.finished.emit()
 
     def _analyze_person_across_entire_video(self, person_id, person_tracker, start_frame, end_frame, fps, rotation):
         """Analyze a specific person between start_frame and end_frame to detect gestures."""
@@ -236,9 +249,11 @@ class GestureDetectWorker(QThread):
                     duration_seconds=GESTURE_DURATION
                 )
                 if gesture_detected:
-                    return True
+                    # Instead of just returning True, return the exact frame and bbox
+                    return frame_num, person_data['bbox'] 
         
-        return False
+        # If no gesture was found after checking all frames, return None
+        return None, None
 
 
 class ExportWorker(QThread):
@@ -284,6 +299,9 @@ class MainWindow(QMainWindow):
         self.editor_panel.thumbnailClicked.connect(self._on_thumbnail_clicked)
         self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
         self.editor_panel.exportRequested.connect(self._on_save_project)
+                # After creating self.editor_panel
+        self.editor_panel.fileDropped.connect(self._on_file_dropped)
+
 
         # Connect blur UI -> core
         try:
@@ -450,79 +468,145 @@ class MainWindow(QMainWindow):
 
     # ---------- Controller slots ----------
     def _on_import_requested(self):
+        """
+        Shows the file dialog and then passes the selected path
+        to the _on_file_dropped handler, which has the correct logic.
+        """
         vid_path, _ = QFileDialog.getOpenFileName(
             self, "Open Video File", "",
             "Video Files (*.mp4 *.MP4 *.avi *.AVI *.mov *.MOV);;All Files (*)"
         )
         if not vid_path:
             return
-        # Stop timers/audio tied to the previous video
+            
+        # Call the drag-and-drop handler, which has the correct logic
+        self._on_file_dropped(vid_path)
+    
+
+
+    @pyqtSlot(str)
+    def _on_file_dropped(self, path: str):
+        """
+        Handle drag-and-dropped video files.
+        Same logic as _on_import_requested, but using the provided path.
+        """
+        if not path:
+            return
+
+        # Check extension
+        supported_ext = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
+        if not path.lower().endswith(supported_ext):
+            self._toast(
+                "Unsupported file type. Please drop a video file.",
+                "StopFilming – Import",
+            )
+            return
+
+        # Clear previous video state
+        self._reset_state_before_new_video()
+
+        # Store path in core + panel so audio works
+        self.core.video_path = path
+        self.editor_panel.video_path = path
+
+        # ---- Load video via EditorCore ----
+        try:
+            meta = self.core.load_video(path)
+        except Exception as e:
+            self._show_error(f"Error opening video:\n{e}")
+            return
+
+        total_frames   = meta.get("total_frames", 0)
+        fps            = meta.get("fps", 0.0)
+        rotation_angle = meta.get("rotation_angle", 0) or 0
+        self.core.rotation_angle = rotation_angle
+        width          = meta.get("width")
+        height         = meta.get("height")
+
+
+        # ---- Update the UI panel (this also updates FPS / duration / resolution labels) ----
+        self.editor_panel.set_video_info(
+            rotation_angle,
+            total_frames,
+            fps,
+            width=width,
+            height=height,
+        )
+
+        # Show first frame
+        first = self.core.get_frame(0)
+        if first is not None:
+            self.editor_panel.display_frame(first, 0)
+
+        # ---- Build thumbnails using MainWindow helper (NOT on EditorCore) ----
+        self._build_thumbnails()
+
+
+
+    def _reset_state_before_new_video(self):
+        """Stops all playback and clears all data from the previous video."""
+        print("[STATE] Resetting state for new video...")
+        
+        # 1. Stop playback timer
         self.play_timer.stop()
+        
+        # 2. Pause audio and clean up resources
         try:
             self.editor_panel.audio_pause()
-        except Exception:
-            pass
+            if hasattr(self.editor_panel, 'cleanup_audio_resources'):
+                self.editor_panel.cleanup_audio_resources()
+        except Exception as e:
+            print(f"Warning: could not pause/clean audio: {e}")
 
-        # Ensure the previous cap is closed before opening a new one
+        # 3. Release video capture
         if getattr(self.core, "cap", None) is not None:
             try:
                 self.core.cap.release()
-            except Exception:
-                pass
-            self.core.cap = None
+            except Exception as e:
+                print(f"Warning: could not release video capture: {e}")
+        self.core.cap = None
+        self.core.video_path = None
 
+        # 4. Clear core model data
+        if hasattr(self.core, "detected_people"):
+            self.core.detected_people = []
+        if hasattr(self.core, "blurred_frames"):
+            self.core.blurred_frames.clear()
+        if hasattr(self.core, "blurred_cache"):
+            self.core.blurred_cache.clear()
+        if hasattr(self.core, "_frame_cache"):
+            self.core._frame_cache.clear()
         
-        meta = self.core.load_video(vid_path)
-        
+        # 5. Reset the shared tracker
+        self.person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
 
-        # Get and apply consistent MoviePy rotation (matches clean_gesture_blur.py)
-        self._moviepy_rotation = self._get_rotation_from_metadata(vid_path)
-        self.core.rotation_angle = self._moviepy_rotation
-        print(f"[IMPORT] MoviePy rotation metadata: {self._moviepy_rotation}°")
-
-        
-        old_panel = self.editor_panel
-        if hasattr(old_panel, 'cleanup_audio_resources'):
-            old_panel.cleanup_audio_resources()
-        old_panel.deleteLater()
-
-        self.editor_panel = EditorPanel()
-        self.setCentralWidget(self.editor_panel)
-        self.editor_panel.importRequested.connect(self._on_import_requested)
-        self.editor_panel.playToggled.connect(self._on_play_toggled)
-        self.editor_panel.frameChanged.connect(self._on_frame_changed)
-        self.editor_panel.detectRequested.connect(self._on_detect_requested)
-        self.editor_panel.blurRequested.connect(self._on_blur_requested)
-        self.editor_panel.thumbnailClicked.connect(self._on_thumbnail_clicked)
-        self.editor_panel.gestureItemClicked.connect(self._on_gesture_item_clicked)
-        self.editor_panel.exportRequested.connect(self._on_save_project)
+        # 6. Clear UI state
         try:
-            self._wire_blur_ui()
-        except Exception:
-            pass
+            self.editor_panel.clear_thumbnails()
+            self.editor_panel.clear_markers()
+            if hasattr(self.editor_panel, "gesture_list"):
+                self.editor_panel.gesture_list.clear()
+            # Reset slider/labels back to zero
+            self.editor_panel.set_video_info(rotation_angle=0, total_frames=0, fps=0.0, width=0, height=0)
+            # Clear the video frame itself
+            self.editor_panel.display_frame(None, 0) 
+        except Exception as e:
+            print(f"Warning: could not reset panel UI components: {e}")
 
-        self.editor_panel.set_video_info(
-            rotation_angle=meta["rotation_angle"],
-            total_frames=meta["total_frames"],
-            fps=meta["fps"]
-        )
-        self.editor_panel.video_path = self.core.video_path  # sets up audio
+        # 7. Garbage collect
+        gc.collect()
 
-        frame0 = self.core.get_frame(0)
-        if frame0 is not None:
-            frame0 = self._apply_rotation(frame0)
-            self.editor_panel.display_frame(frame0, 0)
 
-        thumbs = self.core.generate_thumbnails(num_thumbs=16)
+    def _build_thumbnails(self):
+        """Generate and display timeline thumbnails for the current video."""
+        try:
+            thumbs = self.core.generate_thumbnails(num_thumbs=16)
+        except Exception as e:
+            print("Thumbnail generation error:", e)
+            return
+
+        self.editor_panel.clear_thumbnails()
         self.editor_panel.add_thumbnails(thumbs)
-
-        self.setWindowTitle(f"StopFilming — Editing: {vid_path}")
-        screen = QApplication.primaryScreen()
-        rect = screen.availableGeometry()
-        self.showNormal()
-        self.resize(rect.width(), rect.height())
-        self.repaint()
-        QApplication.processEvents()
 
     
     def _toast(self, text: str, title: str = "StopFilming", ms: int = 1500):
@@ -660,24 +744,33 @@ class MainWindow(QMainWindow):
             self.editor_panel.toggle_button.setText("Play")
             self.editor_panel.audio_pause()
 
+    
+
     def _get_rotation_from_metadata(self, path):
-        """Get rotation metadata consistently from MOV/MP4 files using MoviePy."""
+        """
+        Optional: use MoviePy to read rotation metadata when OpenCV/ffprobe is weird.
+        """
         try:
-            clip = VideoFileClip(path)
-            rotation = int(getattr(clip, "rotation", 0) or 0)
-            clip.close()
-            if rotation not in (0, 90, 180, 270):
-                rotation = 0
+            with VideoFileClip(path) as clip:
+                # MoviePy stores rotation in 'rotate' metadata for some MOVs
+                rotation = int(clip.rotation) if hasattr(clip, "rotation") else 0
         except Exception:
             rotation = 0
+
+        self._moviepy_rotation = rotation
+        self.core.rotation_angle = rotation
         return rotation
 
 
+
     def _apply_rotation(self, frame):
-        """Apply consistent frame rotation based on actual metadata (matches clean_gesture_blur.py)."""
+        """Apply consistent frame rotation based on the EditorCore's angle."""
         if frame is None:
             return None
-        rotation = getattr(self, "_moviepy_rotation", 0)
+        # --- THIS IS THE FIX ---
+        rotation = getattr(self.core, "rotation_angle", 0)
+        # --- END OF FIX ---
+        
         if rotation == 90:
             return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
         elif rotation == 180:
@@ -697,11 +790,9 @@ class MainWindow(QMainWindow):
             
             # Check blurred cache first
             if frame_idx in self.core.blurred_cache:
-                img = self.core.blurred_cache[frame_idx].copy()  # Make a copy to be safe
+                img = self.core.blurred_cache[frame_idx].copy()  # This frame is already rotated
             else:
-                img = self.core.get_frame(frame_idx)
-                if img is not None:
-                    img = self._apply_rotation(img)
+                img = self.core.get_frame(frame_idx) 
             
             if img is not None:
                 self.editor_panel.display_frame(img, frame_idx)
@@ -725,6 +816,8 @@ class MainWindow(QMainWindow):
             return
 
         frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+        
+        # Apply rotation (frame from cap.read() is not rotated)
         display_frame = self._apply_rotation(frame)
 
         # --- Use blurred frame cache if available ---

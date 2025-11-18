@@ -1240,6 +1240,7 @@ class EnhancedEditorPanel(QWidget):
     thumbnailClicked = pyqtSignal(int)
     gestureItemClicked = pyqtSignal(object)   
     exportRequested = pyqtSignal()
+    fileDropped = pyqtSignal(str)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1263,6 +1264,10 @@ class EnhancedEditorPanel(QWidget):
         self._player.setVolume(90)
         self._has_media = False
         self._audio_fallback_path = None
+
+        self.setMouseTracking(True)
+        # NEW: allow drag & drop of video files
+        self.setAcceptDrops(True)
 
           
         # Connect error handling AFTER creating the player
@@ -1394,6 +1399,32 @@ class EnhancedEditorPanel(QWidget):
                 background: {ACCENT_HOVER};
             }}
         """)
+
+    # NEW: drag & drop support
+    def dragEnterEvent(self, event):
+        md = event.mimeData()
+        if md.hasUrls():
+            # Only accept if at least one local file with a video extension
+            local_urls = [u for u in md.urls() if u.isLocalFile()]
+            if local_urls:
+                path = local_urls[0].toLocalFile().lower()
+                if path.endswith((".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event):
+        md = event.mimeData()
+        local_urls = [u for u in md.urls() if u.isLocalFile()]
+        if not local_urls:
+            event.ignore()
+            return
+
+        path = local_urls[0].toLocalFile()
+        # Emit the dropped file path so MainWindow can load it
+        self.fileDropped.emit(path)
+        event.acceptProposedAction()
+
     
     def _build_enhanced_ui(self):
         """Build the enhanced UI with Premiere Pro styling"""
@@ -1595,6 +1626,7 @@ class EnhancedEditorPanel(QWidget):
                     self.bbox_rect = None
                     self.pulse_value = 3  # Start at normal width
                     self.opacity = 255
+                    
                     
                 def set_bbox(self, x, y, w, h):
                     self.bbox_rect = (x, y, w, h)
@@ -1932,33 +1964,38 @@ class EnhancedEditorPanel(QWidget):
             )
 
     # All other methods remain the same as original EditorPanel
-
-    # def get_detection_params(self):
-    #     """Return current detection UI knobs in controller-friendly units."""
-    #     conf_pct = self.conf_slider.value() if hasattr(self, "conf_slider") else 80
-    #     frame_skip = self.skip_spin.value() if hasattr(self, "skip_spin") else 2
-    #     return {
-    #         "confidence": conf_pct / 100.0,   # 0.80 for 80%
-    #         "frame_skip": int(frame_skip),
-    #     }  
-
-    def set_video_info(self, rotation_angle, total_frames, fps):
-        """Set video information and enable controls"""
-        self.rotation_angle = rotation_angle
-        self.total_frames = total_frames
-        self.fps = fps
+    def set_video_info(self,
+                   rotation_angle: int,
+                   total_frames: int,
+                   fps: float,
+                   width: int = None,
+                   height: int = None):
+        """Set video information, enable controls, and update labels."""
+        # Store basic info
+        self.rotation_angle = rotation_angle or 0
+        self.total_frames = total_frames or 0
+        self.fps = fps or 0.0
         self.current_frame_idx = 0
 
-        self.slider.setMaximum(max(0, total_frames - 1))
-        self.slider.setEnabled(True)    
+        # Enable controls
+        self.slider.setMaximum(max(0, self.total_frames - 1))
+        self.slider.setEnabled(True)
         self.toggle_button.setEnabled(True)
         self.detect_button.setEnabled(True)
         self.blur_button.setEnabled(True)
         self.export_button.setEnabled(True)
 
-        self.time_ruler.setVideoInfo(total_frames, fps)
+        # Time ruler
+        try:
+            self.time_ruler.setVideoInfo(self.total_frames, self.fps)
+        except Exception:
+            pass
+
         self.core_has_video = True
-        self.import_popup.hide()
+        try:
+            self.import_popup.hide()
+        except Exception:
+            pass
 
         # Audio setup if we already know the file path
         try:
@@ -1967,21 +2004,40 @@ class EnhancedEditorPanel(QWidget):
         except Exception:
             pass
 
-        # Update the Video Properties pills (FPS / Resolution / Duration)
+        # ===== Update the Video Properties pills =====
         try:
+            # FPS pill
             if hasattr(self, "lbl_fps"):
-                self.lbl_fps.setText(f"{fps:.0f}" if fps else "--")
+                self.lbl_fps.setText(f"{self.fps:.0f}" if self.fps > 0 else "--")
 
+            # Resolution pill (NEW)
             if hasattr(self, "lbl_res"):
-                self.lbl_res.setText("--")
+                if width and height:
+                    self.lbl_res.setText(f"{int(width)}×{int(height)}")
+                else:
+                    self.lbl_res.setText("--")
 
+            # Duration pill
             if hasattr(self, "lbl_dur"):
-                duration = (total_frames / fps) if (fps and total_frames) else 0
-                mm = int(duration // 60)
-                ss = int(duration % 60)
-                self.lbl_dur.setText(f"{mm:02d}:{ss:02d}" if duration else "--")
+                if self.fps > 0 and self.total_frames > 0:
+                    duration = self.total_frames / self.fps
+                    mm = int(duration // 60)
+                    ss = int(duration % 60)
+                    self.lbl_dur.setText(f"{mm:02d}:{ss:02d}")
+                else:
+                    self.lbl_dur.setText("--")
         except Exception:
             pass
+
+        # ===== Make the viewport respect the video aspect ratio (NEW) =====
+        try:
+            if width and height and hasattr(self, "video_display"):
+                # video_display is a VideoViewport
+                self.video_display.set_aspect_from_size(width, height)
+        except Exception:
+            # If anything fails, we just don't adjust aspect; no crash.
+            pass
+
 
     def show_selection_badge(self, text: str):
         self.selection_badge.setText(text)
@@ -1992,52 +2048,55 @@ class EnhancedEditorPanel(QWidget):
         self.selection_badge.hide()
     
     def display_frame(self, img_bgr, frame_idx: int):
-        """Display video frame (optimized for smooth playback)"""
+        """
+        Display video frame (optimized for smooth playback).
+        This method assumes it receives a pre-rotated BGR frame.
+        """
         
+        # 1. Handle null frame (e.g., after loading or at end)
         if img_bgr is None:
-            self.video_display.set_frame_qimage(QImage())
+            # Use your custom widget's method to clear the frame
+            self.video_display.set_frame_qimage(QImage()) 
             self.current_frame_idx = -1
             self.time_ruler.setCurrentFrame(-1)
             return
 
         try:
-            # Apply rotation if needed
-            if hasattr(self, 'rotation_angle'):
-                if self.rotation_angle == 90:
-                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_CLOCKWISE)
-                elif self.rotation_angle == 180:
-                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_180)
-                elif self.rotation_angle == 270:
-                    img_bgr = cv2.rotate(img_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            
+            # 2. Convert BGR (from OpenCV) to RGB (for QImage)
+            # --- We no longer apply any rotation here ---
             rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
+            
+            if h == 0 or w == 0:
+                return # Invalid frame
+                
             bytes_per_line = ch * w
             
-            # Ensure contiguous array for performance
+            # 3. Ensure contiguous array for performance
             rgb = np.ascontiguousarray(rgb)
             
-            # Create QImage with copied data
+            # 4. Create QImage from bytes
+            # Note: We must copy the data to avoid memory issues
             img_bytes = rgb.tobytes()
             qimg = QImage(img_bytes, w, h, bytes_per_line, QImage.Format_RGB888)
-            qimg = qimg.copy()  # Force deep copy
+            qimg = qimg.copy() 
 
-            # Set aspect ratio only once
+            # 5. Set aspect ratio (run only once)
             if not hasattr(self.video_display, '_aspect_set'):
                 self.video_display.set_aspect_from_size(w, h)
                 self.video_display._aspect_set = True
 
-            # Update display
+            # 6. Update UI elements
             self.video_display.set_frame_qimage(qimg)
             self.current_frame_idx = frame_idx
             self.time_ruler.setCurrentFrame(frame_idx)
             
-            # Update slider without triggering signals
+            # 7. Update slider without triggering signals
             self.slider.blockSignals(True)
             self.slider.setValue(frame_idx)
             self.slider.blockSignals(False)
 
-            # Sync audio only when NOT playing (avoid double-sync during playback)
+            # 8. Sync audio (only if paused/scrubbing)
             if not getattr(self, 'is_playing', False):
                 self.audio_seek_to_frame(frame_idx, self.fps)
 
