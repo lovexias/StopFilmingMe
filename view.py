@@ -98,190 +98,315 @@ print("DOCS PATH:", _find_docs_html())
 
 
 class ExportDialog(QDialog):
+    """
+    Export Settings Dialog - Styled to match the Pro Dark Theme
+    """
     def __init__(self, parent=None, suggest_name="export", suggest_dir=None):
         super().__init__(parent)
+        
         self.setWindowTitle("Export Video")
         self.setModal(True)
-        self.setMinimumWidth(540)
+        self.setMinimumWidth(500)
+        # Remove the "?" help button from title bar
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
-        self.setStyleSheet(f"""
-            QDialog {{ 
-                background: {PANEL_BG}; 
-                color: {TEXT}; 
-                border: 1px solid {BORDER}; 
+        # --- 1. PRO DARK THEME CSS (Matches ProcessingDialog) ---
+        # We use specific HEX codes to ensure it looks exactly like the reference image
+        self.setStyleSheet("""
+            QDialog { 
+                background-color: #2d2d2d; 
+                color: #e0e0e0; 
+                border: 1px solid #3e3e3e; 
                 border-radius: 8px;
                 font-family: 'Segoe UI', Tahoma, sans-serif;
-            }}
-            QLabel {{ 
-                color: {TEXT}; 
+            }
+            QLabel { 
+                color: #e0e0e0; 
                 font-size: 13px;
                 font-weight: 500;
-            }}
-            QLineEdit, QComboBox {{
-                background: {DARKER_BG}; 
-                color: {TEXT}; 
-                border: 1px solid {BORDER}; 
+            }
+            QLineEdit, QComboBox {
+                background-color: #1e1e1e; 
+                color: #ffffff; 
+                border: 1px solid #3e3e3e; 
                 border-radius: 4px; 
                 padding: 8px 10px;
                 font-size: 13px;
-                selection-background-color: {ACCENT};
-            }}
-            QLineEdit:focus, QComboBox:focus {{
-                border-color: {ACCENT};
-                background: {APP_BG};
-            }}
-            QSlider::groove:horizontal {{ 
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #3a96dd; /* Pro Blue Focus */
+            }
+            /* Dropdown List Styling */
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: #ffffff;
+                selection-background-color: #3a96dd;
+                border: 1px solid #3e3e3e;
+            }
+            /* Slider Styling */
+            QSlider::groove:horizontal { 
                 height: 4px; 
                 border-radius: 2px; 
-                background: {BORDER}; 
-            }}
-            QSlider::sub-page:horizontal {{ 
-                background: {ACCENT}; 
+                background: #444444; 
+            }
+            QSlider::sub-page:horizontal { 
+                background: #3a96dd; 
                 border-radius: 2px; 
-            }}
-            QSlider::handle:horizontal {{ 
-                background: {ACCENT}; 
-                width: 16px; 
-                height: 16px; 
+            }
+            QSlider::handle:horizontal { 
+                background: #ffffff; 
+                width: 16px; height: 16px; 
                 margin: -6px 0; 
-                border-radius: 8px;
-                border: 2px solid {PANEL_BG};
-            }}
-            QSlider::handle:horizontal:hover {{ 
-                background: {ACCENT_HOVER}; 
-            }}
-            QPushButton {{ 
-                background: {ACCENT}; 
+                border-radius: 8px; 
+            }
+            /* Button Styling */
+            QPushButton { 
+                background-color: #3a96dd; 
                 color: white; 
                 border: none; 
                 border-radius: 4px; 
-                padding: 10px 18px;
-                font-size: 13px;
+                padding: 8px 18px;
                 font-weight: 600;
-            }}
-            QPushButton:hover {{ 
-                background: {ACCENT_HOVER}; 
-            }}
-            QPushButton:pressed {{ 
-                background: {ACCENT}; 
-                transform: translateY(1px);
-            }}
+                font-size: 13px;
+            }
+            QPushButton:hover { background-color: #3282bf; }
+            QPushButton:pressed { background-color: #286ea8; }
         """)
 
-        v = QVBoxLayout(self); v.setContentsMargins(24,20,24,20); v.setSpacing(16)
+        # Layout
+        v = QVBoxLayout(self)
+        v.setContentsMargins(30, 25, 30, 25)
+        v.setSpacing(18)
 
-        # Destination folder + filename
+        # --- 2. FORM INPUTS ---
+
+        # Path Selection
         row_path = QHBoxLayout()
         self.dir_edit = QLineEdit(suggest_dir or os.path.expanduser("~"))
         btn_browse = QPushButton("Browse...")
+        btn_browse.setStyleSheet("background-color: #444; color: #ddd;") # Grey button for browse
         btn_browse.clicked.connect(self._pick_folder)
-        row_path.addWidget(QLabel("Output Folder"))
+        
+        row_path.addWidget(QLabel("Folder:"))
         row_path.addWidget(self.dir_edit, 1)
         row_path.addWidget(btn_browse)
         v.addLayout(row_path)
 
+        # Filename
         row_name = QHBoxLayout()
         self.name_edit = QLineEdit(suggest_name)
-        row_name.addWidget(QLabel("File Name"))
+        row_name.addWidget(QLabel("Name:"))
         row_name.addWidget(self.name_edit, 1)
         v.addLayout(row_name)
+        
 
-        # Container / format
+
+        # Separator
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color: #3e3e3e;")
+        v.addWidget(line)
+
+        # Format & Codec
         row_fmt = QHBoxLayout()
         self.format_box = QComboBox()
         self.format_box.addItems(["mp4", "mov", "avi"])
-        row_fmt.addWidget(QLabel("Format"))
-        row_fmt.addWidget(self.format_box, 1)
-        v.addLayout(row_fmt)
-
-        # Codec (basic choices; adapt to what your core supports)
-        row_codec = QHBoxLayout()
+        
         self.codec_box = QComboBox()
-        # sensible defaults per container
         self._codec_map = {
             "mp4": ["h264", "hevc"],
             "mov": ["h264", "prores"],
             "avi": ["mjpeg", "h264"]
         }
-        self._refresh_codecs()
         self.format_box.currentTextChanged.connect(self._refresh_codecs)
-        row_codec.addWidget(QLabel("Codec"))
-        row_codec.addWidget(self.codec_box, 1)
-        v.addLayout(row_codec)
+        self._refresh_codecs() # init
 
-        # Quality (target bitrate Mbps)
+        row_fmt.addWidget(QLabel("Format:"))
+        row_fmt.addWidget(self.format_box, 1)
+        row_fmt.addWidget(QLabel("Codec:"))
+        row_fmt.addWidget(self.codec_box, 1)
+        v.addLayout(row_fmt)
+
+        # Quality Slider
         row_q = QHBoxLayout()
         self.quality_mbps = QSlider(Qt.Horizontal)
-        self.quality_mbps.setRange(2, 50)  # 2–50 Mbps
+        self.quality_mbps.setRange(2, 50)
         self.quality_mbps.setValue(12)
         self.quality_label = QLabel("12 Mbps")
-        self.quality_label.setStyleSheet(f"color: {ACCENT}; font-weight: 600;")
+        self.quality_label.setStyleSheet("color: #3a96dd; font-weight: bold;")
         self.quality_mbps.valueChanged.connect(lambda v_: self.quality_label.setText(f"{v_} Mbps"))
-        row_q.addWidget(QLabel("Bitrate"))
+        
+        row_q.addWidget(QLabel("Bitrate:"))
         row_q.addWidget(self.quality_mbps, 1)
         row_q.addWidget(self.quality_label)
         v.addLayout(row_q)
 
-        # Resolution + FPS downscale shortcuts
+        # Resolution & FPS
         row_res = QHBoxLayout()
         self.res_box = QComboBox()
         self.res_box.addItems(["Original", "1080p", "720p", "480p"])
-        row_res.addWidget(QLabel("Resolution"))
-        row_res.addWidget(self.res_box, 1)
-
+        
         self.fps_box = QComboBox()
         self.fps_box.addItems(["Original", "60", "30", "24"])
-        row_res.addWidget(QLabel("FPS"))
+        
+        row_res.addWidget(QLabel("Size:"))
+        row_res.addWidget(self.res_box, 1)
+        row_res.addWidget(QLabel("FPS:"))
         row_res.addWidget(self.fps_box, 1)
         v.addLayout(row_res)
 
-        # Buttons
+        v.addSpacing(10)
+
+        # --- 3. ACTION BUTTONS (Cancel & Export) ---
         row_btns = QHBoxLayout()
         row_btns.addStretch(1)
+        
+        # Cancel Button (Red Style)
         btn_cancel = QPushButton("Cancel")
-        btn_cancel.setStyleSheet(f"""
-            QPushButton {{
-                background: {BORDER};
-                color: {TEXT};
-            }}
-            QPushButton:hover {{
-                background: {BORDER_LIGHT};
-            }}
+        btn_cancel.setCursor(Qt.PointingHandCursor)
+        btn_cancel.setStyleSheet("""
+            QPushButton {
+                background-color: #d32f2f;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 18px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #b71c1c; }
         """)
         btn_cancel.clicked.connect(self.reject)
-        btn_ok = QPushButton("Export")
+        
+        # Export Button (Blue Style)
+        btn_ok = QPushButton("Export Video")
+        btn_ok.setCursor(Qt.PointingHandCursor)
+        btn_ok.setStyleSheet("""
+            QPushButton {
+                background-color: #3a96dd;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 25px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3282bf;
+            }
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #aaaaaa;
+                border: none;
+            }
+        """)
+
+        btn_ok.clicked.connect(self.accept)
+        self.btn_export = btn_ok  # <-- ADD THIS
+
         row_btns.addWidget(btn_cancel)
         row_btns.addWidget(btn_ok)
         v.addLayout(row_btns)
 
-        btn_ok.clicked.connect(self.accept)
+
+        self.dir_edit.textChanged.connect(self.validate_fields)
+        self.name_edit.textChanged.connect(self.validate_fields)
+        self.validate_fields()  # initial state
+
+
 
     def _refresh_codecs(self):
         self.codec_box.clear()
-        self.codec_box.addItems(self._codec_map.get(self.format_box.currentText(), ["h264"]))
+        fmt = self.format_box.currentText()
+        self.codec_box.addItems(self._codec_map.get(fmt, ["h264"]))
 
     def _pick_folder(self):
-        path = QFileDialog.getExistingDirectory(self, "Choose export folder", self.dir_edit.text() or os.path.expanduser("~"))
+        path = QFileDialog.getExistingDirectory(self, "Choose export folder", self.dir_edit.text())
         if path:
             self.dir_edit.setText(path)
 
     def result_values(self):
+        """Returns the dictionary of settings chosen by the user"""
         fmt = self.format_box.currentText()
         name = self.name_edit.text().strip() or "export"
         folder = self.dir_edit.text().strip() or os.path.expanduser("~")
         base = os.path.join(folder, name)
         fullpath = f"{base}.{fmt}"
+        
         return {
             "path": fullpath,
-            "container": fmt,                       # "mp4"|"mov"|...
-            "codec": self.codec_box.currentText(), # e.g. "h264"
+            "container": fmt,
+            "codec": self.codec_box.currentText(),
             "bitrate_mbps": int(self.quality_mbps.value()),
             "resolution": self.res_box.currentText(),
             "fps": self.fps_box.currentText(),
         }
+    
+    def validate_fields(self):
+        folder_ok = bool(self.dir_edit.text().strip())
+        name_ok = bool(self.name_edit.text().strip())
+
+        all_ok = folder_ok and name_ok
+
+        # Enable/disable the export button
+        self.btn_export.setEnabled(all_ok)
+
+        # Red borders (visual feedback)
+        self.dir_edit.setStyleSheet(
+            "" if folder_ok else "border: 1px solid #d9534f;"
+        )
+        self.name_edit.setStyleSheet(
+            "" if name_ok else "border: 1px solid #d9534f;"
+        )
+
+        # Tooltip explanation for why disabled
+        if not all_ok:
+            missing = []
+            if not folder_ok:
+                missing.append("folder")
+            if not name_ok:
+                missing.append("file name")
+
+            # Build text like: "Please enter: folder, file name"
+            reason = ", ".join(missing)
+
+            self.btn_export.setToolTip(
+                f"Please enter a valid {reason} before exporting."
+            )
+        else:
+            # Clear tooltip when valid
+            self.btn_export.setToolTip("")
+
+    def accept(self):
+        folder = self.dir_edit.text().strip()
+        name = self.name_edit.text().strip()
+
+        if not folder:
+            dlg = StopFilmingErrorDialog(self, "Please choose a folder for export.")
+            dlg.exec_()
+            return
+
+        if not name:
+            dlg = StopFilmingErrorDialog(self, "Please enter a file name.")
+            dlg.exec_()
+            return
+
+        # Optional: illegal filename check
+        import re
+        if not re.match(r'^[A-Za-z0-9 _.-]+$', name):
+            dlg = StopFilmingErrorDialog(
+                self,
+                "The file name contains invalid characters.\n"
+                "Allowed: A–Z, 0–9, space, underscore, dash, dot."
+            )
+            dlg.exec_()
+            return
+
+        # If everything is valid, proceed
+        super().accept()
 
 
+
+    
+    
 # --- Quick Help dialog --------------------------------------------------------
 class HelpDialog(QDialog):
     def __init__(self, parent=None):
@@ -659,9 +784,116 @@ class ProcessingDialog(QDialog):
                 eta_ss = eta_s % 60
                 eta = f" • ETA {eta_m:02d}:{eta_ss:02d}"
             self.right_info.setText(elapsed_txt + eta)
-        
+class StopFilmingSuccessDialog(QDialog):
+    def __init__(self, parent=None, message="Export complete!", path=None):
+        super().__init__(parent)
 
-    
+        self.setWindowTitle("Export Complete – StopFilming")
+        self.setModal(True)
+        self.setFixedSize(420, 220)
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2d2d2d;
+                border: 1px solid #3e3e3e;
+                color: #e0e0e0;
+                font-family: Segoe UI;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 14px;
+            }
+            QPushButton {
+                background-color: #3a96dd;
+                color: white;
+                padding: 8px 22px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #297bbb;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(25, 25, 25, 25)
+        layout.setSpacing(12)
+
+        # Title
+        title = QLabel("✓  Export Complete")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #6ee27b;")
+        layout.addWidget(title)
+
+        # Message
+        msg = QLabel(message)
+        msg.setAlignment(Qt.AlignCenter)
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        # File path display
+        if path:
+            path_label = QLabel(path)
+            path_label.setAlignment(Qt.AlignCenter)
+            path_label.setWordWrap(True)
+            path_label.setStyleSheet("font-size: 12px; color: #aaddff;")
+            layout.addWidget(path_label)
+
+        # OK button
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        layout.addWidget(ok_btn, alignment=Qt.AlignCenter)
+
+
+class StopFilmingErrorDialog(QDialog):
+    def __init__(self, parent=None, message="An error occurred"):
+        super().__init__(parent)
+
+        self.setWindowTitle("Export Failed – StopFilming")
+        self.setModal(True)
+        self.setFixedSize(420, 200)
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2d2d2d;
+                border: 1px solid #3e3e3e;
+                color: #e0e0e0;
+                font-family: Segoe UI;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 14px;
+            }
+            QPushButton {
+                background-color: #3a96dd;
+                color: white;
+                padding: 8px 22px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #297bbb;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(25, 25, 25, 25)
+
+        title = QLabel("⚠  Export Failed")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffcc00;")
+        layout.addWidget(title)
+
+        msg = QLabel(message)
+        msg.setAlignment(Qt.AlignCenter)
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        btn = QPushButton("OK")
+        btn.clicked.connect(self.accept)
+        layout.addWidget(btn, alignment=Qt.AlignCenter)
+
+
 class VideoViewport(QWidget):
     """
     A paint-on-demand widget that always renders the current frame with
@@ -1400,6 +1632,37 @@ class EnhancedEditorPanel(QWidget):
             }}
         """)
 
+
+    
+    # In view.py inside EditorPanel class
+
+    def reset_all_blurs(self):
+        # 1. Clear the list on the right side
+        if hasattr(self, "blur_events_list"):
+            self.blur_events_list.clear()
+
+        # 2. Tell the backend to wipe the memory
+        if hasattr(self.core, "clear_all_blurs"):
+            self.core.clear_all_blurs()
+        else:
+            print("ERROR: clear_all_blurs function missing in model.py")
+
+        # 3. FORCE REFRESH: Grab the raw frame again
+        # We must verify we are asking for the current frame
+        current_pos = self.frame_slider.value()
+        
+        # Manually force the core to re-read the frame (bypassing cache if possible)
+        # Since we cleared _frame_cache in Step 1, this will get a clean frame.
+        clean_frame = self.core.get_frame(current_pos)
+        
+        if clean_frame is not None:
+            self.show_frame(clean_frame)
+            print("Screen refreshed: Blurs gone.")
+        else:
+            print("Could not refresh frame.")
+
+
+
     # NEW: drag & drop support
     def dragEnterEvent(self, event):
         md = event.mimeData()
@@ -1516,6 +1779,37 @@ class EnhancedEditorPanel(QWidget):
         
         # Enhanced bottom bar
         self.create_enhanced_bottom_bar(main_layout)
+    
+
+
+    def open_video(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Video", "", "Video Files (*.mp4 *.avi *.mov *.mkv)"
+        )
+        if path:
+            # --- ADD THESE UI RESET LINES ---
+            self.video_label.clear()           # Remove the old image
+            self.video_label.setText("Loading...") 
+            self.frame_slider.setValue(0)      # Reset slider to start
+            self.frame_label.setText("0 / 0")  # Reset counter
+            self.play_button.setText("Play")   # Reset play button
+            self.timer.stop()                  # Stop any running playback
+            # --------------------------------
+
+            try:
+                self.core.load_video(path)
+                
+                # Update UI ranges based on new video length
+                self.frame_slider.setRange(0, self.core.total_frames - 1)
+                self.status_bar.showMessage(f"Loaded: {path}")
+                
+                # Show the first frame of the NEW video
+                self._update_preview() 
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not load video:\n{e}")
+
+
     
     def create_enhanced_import_popup(self, parent):
         """Create Premiere Pro style import popup"""

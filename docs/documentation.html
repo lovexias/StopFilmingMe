@@ -5,25 +5,23 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Privacy-Enhanced Video Editor - Docs</title>
-    <!-- 1. Tailwind CSS CDN -->
+
+    <!-- Tailwind -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- 2. Google Font (Inter) -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <!-- 3. Custom Styles -->
+
+    <!-- Google Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Georgia&display=swap"
+        rel="stylesheet">
+
     <style>
-        /* Use Inter font */
         body {
             font-family: 'Inter', sans-serif;
         }
 
-        /* Smooth scrolling */
         html {
             scroll-behavior: smooth;
         }
 
-        /* Custom scrollbar */
         ::-webkit-scrollbar {
             width: 8px;
             height: 8px;
@@ -31,283 +29,519 @@
 
         ::-webkit-scrollbar-track {
             background: #1f2937;
-            /* gray-800 */
         }
 
         ::-webkit-scrollbar-thumb {
             background: #4b5563;
-            /* gray-600 */
             border-radius: 4px;
         }
 
         ::-webkit-scrollbar-thumb:hover {
             background: #6b7280;
-            /* gray-500 */
         }
 
-        /* Active sidebar link style */
+        .sidebar-link {
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .sidebar-link::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            width: 3px;
+            background: #3b82f6;
+            transform: scaleY(0);
+            transition: transform 0.3s ease;
+        }
+
+        .sidebar-link:hover::before {
+            transform: scaleY(1);
+        }
+
         .sidebar-link.active {
-            background-color: #3b82f6;
-            /* blue-500 */
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
             color: white;
             font-weight: 600;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
+
+        .sidebar-link.active::before {
+            transform: scaleY(1);
+        }
+
+        .section-card {
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .section-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        .feature-item {
+            transition: all 0.3s ease;
+            border-left: 3px solid transparent;
+            padding-left: 1rem;
+        }
+
+        .feature-item:hover {
+            border-left-color: #3b82f6;
+            padding-left: 1.5rem;
+        }
+
+        .gradient-text {
+            background: linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .code-block {
+            position: relative;
+            background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+            transition: all 0.3s ease;
+        }
+
+        .code-block:hover {
+            box-shadow: 0 8px 24px rgba(59, 130, 246, 0.2);
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .animate-fade-in {
+            animation: fadeInUp 0.6s ease-out forwards;
+        }
+
+        .hamburger {
+            display: none;
+        }
+
+        @media (max-width: 1024px) {
+            .hamburger {
+                display: block;
+            }
+
+            .sidebar {
+                transform: translateX(-100%);
+                transition: transform 0.3s ease;
+            }
+
+            .sidebar.open {
+                transform: translateX(0);
+            }
+
+            .main-content {
+                margin-left: 0 !important;
+            }
+
+            .overlay {
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.5);
+                z-index: 9;
+            }
+
+            .overlay.active {
+                display: block;
+            }
+        }
+
+        .img-container {
+            position: relative;
+            overflow: hidden;
+            border-radius: 0.5rem;
+        }
+
+        .img-container img {
+            transition: transform 0.5s ease;
+        }
+
+        .img-container:hover img {
+            transform: scale(1.05);
+        }
+
+        .credit-card {
+            transition: all 0.3s ease;
+        }
+
+        .credit-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 32px rgba(59, 130, 246, 0.2);
         }
     </style>
 </head>
 
 <body class="bg-gray-900 text-gray-200">
 
-    <!-- Sidebar Navigation -->
-    <nav class="fixed top-0 left-0 w-64 h-screen bg-gray-800 p-6 shadow-lg z-10 overflow-y-auto">
-        <h1 class="text-2xl font-bold text-white mb-6">
-            Privacy Video Editor
-        </h1>
+    <!-- Hamburger Button -->
+    <button class="hamburger fixed top-4 left-4 z-50 bg-gray-800 p-3 rounded-lg shadow-lg hover:bg-gray-700 transition"
+        onclick="toggleSidebar()">
+        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+        </svg>
+    </button>
+
+    <!-- Overlay -->
+    <div class="overlay" onclick="toggleSidebar()"></div>
+
+    <!-- Sidebar -->
+    <nav class="sidebar fixed top-0 left-0 w-64 h-screen bg-gray-800 p-6 shadow-2xl z-10 overflow-y-auto">
+        <div class="flex items-center justify-between mb-8">
+            <h1 class="text-2xl font-bold text-white gradient-text">Privacy Video Editor</h1>
+            <button class="lg:hidden text-white" onclick="toggleSidebar()">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+            </button>
+        </div>
+
         <ul class="space-y-2">
-            <li><a href="#intro"
-                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Introduction</a>
-            </li>
-            <li><a href="#features"
-                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Features</a>
-            </li>
-            <li><a href="#installation"
-                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Installation</a>
-            </li>
-            <li><a href="#usage"
-                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">How
-                    to Use</a></li>
-            <li><a href="#code"
-                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Code
-                    Structure</a></li>
-            <li><a href="#shortcuts"
-                    class="sidebar-link block px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 hover:text-white transition-colors duration-200">Shortcuts</a>
-            </li>
+            <li><a href="#intro" class="sidebar-link block px-4 py-3 rounded-lg text-gray-300 hover:bg-gray-700" onclick="closeSidebarMobile()">Introduction</a></li>
+            <li><a href="#features" class="sidebar-link block px-4 py-3 rounded-lg text-gray-300 hover:bg-gray-700" onclick="closeSidebarMobile()">Features</a></li>
+            <li><a href="#installation" class="sidebar-link block px-4 py-3 rounded-lg text-gray-300 hover:bg-gray-700" onclick="closeSidebarMobile()">Installation</a></li>
+            <li><a href="#usage" class="sidebar-link block px-4 py-3 rounded-lg text-gray-300 hover:bg-gray-700" onclick="closeSidebarMobile()">How to Use</a></li>
+            <li><a href="#code" class="sidebar-link block px-4 py-3 rounded-lg text-gray-300 hover:bg-gray-700" onclick="closeSidebarMobile()">Code Structure</a></li>
+            <li><a href="#credits" class="sidebar-link block px-4 py-3 rounded-lg text-gray-300 hover:bg-gray-700" onclick="closeSidebarMobile()">Credits</a></li>
+            <li><a href="#shortcuts" class="sidebar-link block px-4 py-3 rounded-lg text-gray-300 hover:bg-gray-700" onclick="closeSidebarMobile()">Shortcuts</a></li>
         </ul>
     </nav>
 
-    <!-- Main Content Area -->
-    <main class="ml-64 p-10 max-w-7xl mx-auto">
+    <!-- Main Content -->
+    <main class="main-content lg:ml-64 p-6 md:p-10 max-w-7xl mx-auto">
 
-        <!-- Introduction Section -->
-        <section id="intro" class="mb-16 min-h-screen">
-            <h2 class="text-4xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Introduction</h2>
-            <p class="text-lg text-gray-300 leading-relaxed mb-6">
-                Welcome to the documentation for the Privacy-Enhanced Video Editor. This is a desktop application built
+        <!-- INTRO -->
+        <section id="intro" class="mb-20 min-h-screen animate-fade-in">
+            <h2 class="text-4xl md:text-5xl font-bold text-white mb-6 border-b-2 border-gray-700 pb-4">
+                <span class="gradient-text">Introduction</span>
+            </h2>
+
+            <p class="text-lg md:text-xl text-gray-300 leading-relaxed mb-6">
+                Welcome to the documentation for the Privacy-Enhanced Video Editor — a desktop application built
                 with Python, PyQt5, and OpenCV, designed to help you edit videos with a focus on privacy.
             </p>
-            <p class="text-lg text-gray-300 leading-relaxed mb-8">
-                The application uses a powerful <strong class="text-blue-400">YOLOv8 model</strong> to automatically
-                detect people in your videos. You can then use its features to track individuals and automatically blur
-                faces, ensuring privacy before sharing your footage.
+
+            <p class="text-lg md:text-xl text-gray-300 leading-relaxed mb-8">
+                The application features <strong class="text-blue-400">YOLOv8 person detection</strong>,
+                <strong class="text-blue-400">automatic face blurring</strong>,
+                gesture detection, and a modern PyQt5 interface built for fast and secure privacy-based workflows.
             </p>
 
-            <!-- Image Screenshot -->
-            <!-- IMPORTANT: This assumes 'image_ffb11f.png' is in the same folder as this HTML file -->
-            <img src="image_application.png" alt="Application Screenshot"
-                class="w-full max-w-3xl mx-auto rounded-lg shadow-2xl border-4 border-gray-700"
-                onerror="this.alt='Screenshot image (image_application.png) not found. Make sure it is in the same folder as this HTML file.'; this.style.display='block'; this.style.color='red'; this.style.padding='1rem'; this.style.border='1px dashed red'; this.style.backgroundColor='#ffebee';">
+            <div class="img-container w-full max-w-3xl mx-auto rounded-lg shadow-2xl border-4 border-gray-700">
+                <img src="image_application.png" alt="App Screenshot"
+                    class="w-full rounded-lg"
+                    onerror="this.alt='Screenshot missing. Place image_application.png in the same folder.'; this.style.border='2px dashed red'; this.style.padding='1rem';">
+            </div>
         </section>
 
-        <!-- Features Section -->
-        <section id="features" class="mb-16">
-            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Features</h2>
-            <ul class="list-disc list-inside space-y-3 text-lg text-gray-300">
-                <li class="flex items-start">
-                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
-                    <strong>Person Detection:</strong> Uses a YOLOv8 model for high-accuracy person detection in video
-                    frames.
-                </li>
-                <li class="flex items-start">
-                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
-                    <strong>Face Blurring:</strong> Automatically blurs the faces of detected people to protect their
-                    privacy.
-                </li>
-                <li class="flex items-start">
-                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
-                    <strong>Gesture Detection:</strong> Can detect gestures within the bounding box of a person (feature
-                    from `detect_gesture_in_person_box`).
-                </li>
-                <li class="flex items-start">
-                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
-                    <strong>Video Playback:</strong> A custom editor panel for loading, playing, and scrubbing through
-                    videos.
-                </li>
-                <li class="flex items-start">
-                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
-                    <strong>Export Functionality:</strong> A dedicated dialog to export the processed video with
-                    settings for quality and format.
-                </li>
-                <li class="flex items-start">
-                    <span class="text-blue-400 mr-3 mt-1">&#10003;</span>
-                    <strong>Modern UI:</strong> Built with PyQt5, providing a responsive and native desktop experience.
-                </li>
-            </ul>
-        </section>
+        <!-- FEATURES -->
+        <section id="features" class="mb-20 animate-fade-in">
+            <h2 class="text-3xl md:text-4xl font-bold text-white mb-8 border-b-2 border-gray-700 pb-4">
+                <span class="gradient-text">Features</span>
+            </h2>
 
-        <!-- Installation Section -->
-        <section id="installation" class="mb-16">
-            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Installation</h2>
-            <p class="text-lg text-gray-300 leading-relaxed mb-6">
-                To run this application locally, you'll need Python and several packages.
-            </p>
-
-            <h3 class="text-2xl font-semibold text-white mb-3">1. Get the Code</h3>
-            <p class="text-gray-300 mb-4">
-                You should have all the project files (`main.py`, `view.py`, `model.py`, etc.) in a single directory.
-            </p>
-
-            <h3 class="text-2xl font-semibold text-white mb-3">2. Install Dependencies</h3>
-            <p class="text-gray-300 mb-4">
-                Based on the imports, you'll need the following packages. You can install them using pip.
-            </p>
-            <pre class="bg-gray-800 p-4 rounded-lg text-gray-100 overflow-x-auto">
-<code>pip install PyQt5 numpy opencv-python ultralytics</code></pre>
-            <p class="text-gray-300 my-4">
-                It's highly recommended to create a Python virtual environment to manage these dependencies.
-            </p>
-
-            <h3 class="text-2xl font-semibold text-white mb-3">3. Run the Application</h3>
-            <p class="text-gray-300 mb-4">
-                Once the dependencies are installed, you can run the application by executing the `main.py` script.
-            </p>
-            <pre class="bg-gray-800 p-4 rounded-lg text-gray-100 overflow-x-auto">
-<code>python main.py</code></pre>
-        </section>
-
-        <!-- How to Use Section -->
-        <section id="usage" class="mb-16">
-            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">How to Use</h2>
-            <p class="text-lg text-gray-300 leading-relaxed mb-6">
-                The application is controlled via the main menu bar.
-            </p>
-
-            <h3 class="text-2xl font-semibold text-white mb-3">File Menu</h3>
-            <ul class="list-disc list-inside space-y-2 text-gray-300 mb-6">
-                <li><strong>Open Video:</strong> Opens a file dialog to select a video file for processing.</li>
-                <li><strong>Export Video:</strong> Opens the export dialog to save your processed video.</li>
-                <li><strong>Exit:</strong> Closes the application.</li>
-            </ul>
-
-            <h3 class="text-2xl font-semibold text-white mb-3">Edit Menu</h3>
-            <ul class="list-disc list-inside space-y-2 text-gray-300 mb-6">
-                <li><strong>Keyboard Shortcuts:</strong> Opens a dialog displaying all available keyboard shortcuts.
-                </li>
-            </ul>
-
-            <h3 class="text-2xl font-semibold text-white mb-3">Settings Menu</h3>
-            <ul class="list-disc list-inside space-y-2 text-gray-300 mb-6">
-                <li><strong>Video Settings:</strong> <span class="text-yellow-400">(Note: Currently not implemented as
-                        per `main.py`)</span></li>
-                <li><strong>Detection Settings:</strong> <span class="text-yellow-400">(Note: Currently not implemented
-                        as per `main.py`)</span></li>
-                <li><strong>Blur Settings:</strong> <span class="text-yellow-400">(Note: Currently not implemented as
-                        per `main.py`)</span></li>
-            </ul>
-
-            <h3 class="text-2xl font-semibold text-white mb-3">Help Menu</h3>
-            <ul class="list-disc list-inside space-y-2 text-gray-300 mb-6">
-                <li><strong>About:</strong> Shows information about the application.</li>
-                <li><strong>View README:</strong> Displays the project's README.md file.</li>
-            </ul>
-        </section>
-
-        <!-- Code Structure Section -->
-        <section id="code" class="mb-16">
-            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Code Structure</h2>
-            <p class="text-lg text-gray-300 leading-relaxed mb-6">
-                The project is organized into several key files, separating logic from the user interface.
-            </p>
-
-            <div class="space-y-4">
-                <div class="bg-gray-800 p-5 rounded-lg shadow">
-                    <h4 class="text-xl font-semibold text-white mb-2"><code>main.py</code></h4>
-                    <p class="text-gray-300">
-                        This is the main entry point for the application. It initializes the `QApplication` and the
-                        `EnhancedVideoEditor` main window. It's responsible for creating the menu bar, actions, and
-                        connecting UI signals (like button clicks) to the core logic.
-                    </p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="feature-item bg-gray-800 p-5 rounded-lg shadow-lg">
+                    <strong class="text-blue-400 text-lg">Person Detection</strong>
+                    <p class="text-gray-400 mt-2">Using YOLOv8</p>
                 </div>
-                <div class="bg-gray-800 p-5 rounded-lg shadow">
-                    <h4 class="text-xl font-semibold text-white mb-2"><code>view.py</code></h4>
-                    <p class="text-gray-300">
-                        This file contains all the custom PyQt5 UI components (Widgets). It defines the visual elements
-                        of the application, such as the `EditorPanel`, `ProcessingDialog`, `ExportDialog`, and
-                        `KeyboardShortcutsDialog`. It handles the "look and feel" but does not contain the core
-                        processing logic.
-                    </p>
+                <div class="feature-item bg-gray-800 p-5 rounded-lg shadow-lg">
+                    <strong class="text-blue-400 text-lg">Face Blurring</strong>
+                    <p class="text-gray-400 mt-2">With automatic tracking</p>
                 </div>
-                <div class="bg-gray-800 p-5 rounded-lg shadow">
-                    <h4 class="text-xl font-semibold text-white mb-2"><code>model.py</code> <span
-                            class="text-sm text-gray-400">(Inferred)</span></h4>
-                    <p class="text-gray-300">
-                        Though not provided, `main.py` imports `EditorCore` from this file. This file likely contains
-                        the application's state and business logic (the "Model" in MVC). It manages the video state,
-                        holds the detection results, and performs the heavy lifting, separate from the UI.
-                    </p>
+                <div class="feature-item bg-gray-800 p-5 rounded-lg shadow-lg">
+                    <strong class="text-blue-400 text-lg">Gesture Detection</strong>
+                    <p class="text-gray-400 mt-2">Privacy signals like palm-out</p>
                 </div>
-                <div class="bg-gray-800 p-5 rounded-lg shadow">
-                    <h4 class="text-xl font-semibold text-white mb-2"><code>utilities.py</code> <span
-                            class="text-sm text-gray-400">(Inferred)</span></h4>
-                    <p class="text-gray-300">
-                        `main.py` imports several helper functions from this file. It likely contains standalone
-                        functions for performing specific tasks, such as `detect_multiple_people_yolov8`,
-                        `PersonTracker`, and `blur_faces_of_person`.
-                    </p>
+                <div class="feature-item bg-gray-800 p-5 rounded-lg shadow-lg">
+                    <strong class="text-blue-400 text-lg">Video Playback</strong>
+                    <p class="text-gray-400 mt-2">With scrubbing, frame stepping</p>
+                </div>
+                <div class="feature-item bg-gray-800 p-5 rounded-lg shadow-lg">
+                    <strong class="text-blue-400 text-lg">Export Engine</strong>
+                    <p class="text-gray-400 mt-2">Resolution, FPS, bitrate, codec control</p>
+                </div>
+                <div class="feature-item bg-gray-800 p-5 rounded-lg shadow-lg">
+                    <strong class="text-blue-400 text-lg">Modern UI</strong>
+                    <p class="text-gray-400 mt-2">Built with PyQt5 components</p>
                 </div>
             </div>
         </section>
 
-        <!-- Keyboard Shortcuts Section -->
-        <section id="shortcuts" class="mb-16">
-            <h2 class="text-3xl font-bold text-white mb-6 border-b border-gray-700 pb-3">Keyboard Shortcuts</h2>
-            <p class="text-lg text-gray-300 leading-relaxed mb-6">
-                A full list of keyboard shortcuts is available from within the application by navigating to <strong
-                    class="text-blue-400">Edit > Keyboard Shortcuts</strong>.
+        <!-- INSTALLATION -->
+        <section id="installation" class="mb-20 animate-fade-in">
+            <h2 class="text-3xl md:text-4xl font-bold text-white mb-8 border-b-2 border-gray-700 pb-4">
+                <span class="gradient-text">Installation</span>
+            </h2>
+
+            <p class="text-gray-300 mb-8 text-lg">
+                Follow these steps to set up and run the Privacy-Enhanced Video Editor on your machine.
             </p>
-            <div class="bg-gray-800 p-5 rounded-lg shadow">
-                <h4 class="text-xl font-semibold text-white mb-2">TODO: Add Quick Reference</h4>
-                <p class="text-gray-300">
-                    You can edit this HTML file to add your most common shortcuts here for quick reference. For example:
+
+            <!-- Step 1 -->
+            <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border-l-4 border-blue-400">
+                <h3 class="text-2xl font-semibold text-white mb-4 flex items-center">
+                    <span class="bg-blue-400 text-gray-900 font-bold w-8 h-8 rounded-full flex items-center justify-center mr-3">1</span>
+                    Create a Virtual Environment
+                </h3>
+                <p class="text-gray-300 mb-4">Recommended for keeping dependencies clean.</p>
+                <pre class="code-block p-6 rounded-lg text-gray-100 overflow-x-auto shadow-lg">
+python -m venv venv
+venv\Scripts\activate      # Windows
+source venv/bin/activate   # macOS / Linux
+                </pre>
+            </div>
+
+            <!-- Step 2 -->
+            <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border-l-4 border-blue-400">
+                <h3 class="text-2xl font-semibold text-white mb-4 flex items-center">
+                    <span class="bg-blue-400 text-gray-900 font-bold w-8 h-8 rounded-full flex items-center justify-center mr-3">2</span>
+                    Install Required Python Packages
+                </h3>
+                <p class="text-gray-300 mb-4">These libraries power the UI, detection, blurring, and exporting features.</p>
+                <pre class="code-block p-6 rounded-lg text-gray-100 overflow-x-auto shadow-lg">
+pip install PyQt5 numpy opencv-python ultralytics mediapipe moviepy
+pip install imageio imageio-ffmpeg Pillow tqdm matplotlib
+                </pre>
+                
+                <h4 class="text-xl font-semibold text-white mt-6 mb-3 text-blue-400">YOLO / PyTorch Backend</h4>
+                <pre class="code-block p-6 rounded-lg text-gray-100 overflow-x-auto shadow-lg">
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# or, for CPU:
+pip install torch torchvision
+                </pre>
+            </div>
+
+            <!-- Step 3 -->
+            <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border-l-4 border-blue-400">
+                <h3 class="text-2xl font-semibold text-white mb-4 flex items-center">
+                    <span class="bg-blue-400 text-gray-900 font-bold w-8 h-8 rounded-full flex items-center justify-center mr-3">3</span>
+                    Install FFmpeg (Required for Export)
+                </h3>
+                <p class="text-gray-300 mb-4">FFmpeg is used for audio/video muxing during export.</p>
+                <div class="space-y-4 text-gray-300 bg-gray-900 p-5 rounded-lg">
+                    <p><strong class="text-blue-400">Windows:</strong> Download from <a href="https://www.gyan.dev/ffmpeg/builds/" class="text-blue-400 underline hover:text-blue-300 transition" target="_blank">gyan.dev</a>, extract to <code class="bg-gray-800 px-2 py-1 rounded text-blue-300">C:\ffmpeg</code>, and add <code class="bg-gray-800 px-2 py-1 rounded text-blue-300">C:\ffmpeg\bin</code> to PATH.</p>
+                    <p><strong class="text-blue-400">macOS:</strong> <code class="bg-gray-800 px-2 py-1 rounded text-blue-300">brew install ffmpeg</code></p>
+                    <p><strong class="text-blue-400">Linux:</strong> <code class="bg-gray-800 px-2 py-1 rounded text-blue-300">sudo apt install ffmpeg</code></p>
+                </div>
+                <pre class="code-block p-6 mt-4 rounded-lg text-gray-100 overflow-x-auto shadow-lg">
+ffmpeg -version     # Verify installation
+                </pre>
+            </div>
+
+            <!-- Step 4 -->
+            <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border-l-4 border-blue-400">
+                <h3 class="text-2xl font-semibold text-white mb-4 flex items-center">
+                    <span class="bg-blue-400 text-gray-900 font-bold w-8 h-8 rounded-full flex items-center justify-center mr-3">4</span>
+                    (Optional) Download YOLO Model
+                </h3>
+                <p class="text-gray-300 mb-4">Required if your project folder does not include <code class="bg-gray-900 px-2 py-1 rounded text-blue-300">yolov8m-seg.pt</code>.</p>
+                <pre class="code-block p-6 rounded-lg text-gray-100 overflow-x-auto shadow-lg">
+yolo download model=yolov8m-seg.pt
+                </pre>
+            </div>
+
+            <!-- Step 5 -->
+            <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg mb-8 border-l-4 border-blue-400">
+                <h3 class="text-2xl font-semibold text-white mb-4 flex items-center">
+                    <span class="bg-blue-400 text-gray-900 font-bold w-8 h-8 rounded-full flex items-center justify-center mr-3">5</span>
+                    Run the Application
+                </h3>
+                <pre class="code-block p-6 rounded-lg text-gray-100 overflow-x-auto shadow-lg">
+python main.py
+                </pre>
+            </div>
+
+            <div class="bg-gradient-to-r from-blue-900/30 to-blue-800/30 border border-blue-400/50 p-6 rounded-lg text-center">
+                <p class="text-gray-200 text-lg">
+                    🎉 Your Privacy-Enhanced Video Editor is now ready to use!
                 </p>
-                <ul class="list-disc list-inside space-y-2 text-gray-300 mt-4">
-                    <li><strong class="text-white">Ctrl + O:</strong> Open Video</li>
-                    <li><strong class="text-white">Ctrl + E:</strong> Export Video</li>
-                    <li><strong class="text-white">Spacebar:</strong> Play / Pause</li>
-                </ul>
+            </div>
+        </section>
+
+        <!-- HOW TO USE -->
+        <section id="usage" class="mb-20 animate-fade-in">
+            <h2 class="text-3xl md:text-4xl font-bold text-white mb-8 border-b-2 border-gray-700 pb-4">
+                <span class="gradient-text">How to Use</span>
+            </h2>
+
+            <div class="space-y-8">
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg">
+                    <h3 class="text-2xl font-semibold text-white mb-4 flex items-center">
+                        <span class="w-2 h-8 bg-blue-400 mr-3 rounded"></span>
+                        File Menu
+                    </h3>
+                    <ul class="space-y-2 text-gray-300 ml-5">
+                        <li class="flex items-start"><span class="text-blue-400 mr-2">•</span><strong>Open Video</strong>: Load a video.</li>
+                        <li class="flex items-start"><span class="text-blue-400 mr-2">•</span><strong>Export Video</strong>: Open the export dialog.</li>
+                        <li class="flex items-start"><span class="text-blue-400 mr-2">•</span><strong>Exit</strong>: Quit the application.</li>
+                    </ul>
+                </div>
+
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg">
+                    <h3 class="text-2xl font-semibold text-white mb-4 flex items-center">
+                        <span class="w-2 h-8 bg-blue-400 mr-3 rounded"></span>
+                        Edit Menu
+                    </h3>
+                    <ul class="space-y-2 text-gray-300 ml-5">
+                        <li class="flex items-start"><span class="text-blue-400 mr-2">•</span><strong>Keyboard Shortcuts</strong>: Opens shortcut reference.</li>
+                    </ul>
+                </div>
+
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg">
+                    <h3 class="text-2xl font-semibold text-white mb-4 flex items-center">
+                        <span class="w-2 h-8 bg-blue-400 mr-3 rounded"></span>
+                        Settings Menu
+                    </h3>
+                    <ul class="space-y-2 text-gray-300 ml-5">
+                        <li class="flex items-start"><span class="text-blue-400 mr-2">•</span><strong>Video Settings</strong>: Configure resolution, FPS, format, codec, and bitrate.</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- CODE STRUCTURE -->
+        <section id="code" class="mb-20 animate-fade-in">
+            <h2 class="text-3xl md:text-4xl font-bold text-white mb-8 border-b-2 border-gray-700 pb-4">
+                <span class="gradient-text">Code Structure</span>
+            </h2>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg border-l-4 border-blue-400">
+                    <h4 class="text-xl font-semibold text-white mb-2">main.py</h4>
+                    <p class="text-gray-400">Initializes the app, menus, windows, and event handlers.</p>
+                </div>
+
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg border-l-4 border-blue-400">
+                    <h4 class="text-xl font-semibold text-white mb-2">view.py</h4>
+                    <p class="text-gray-400">Contains all UI widgets and dialogs.</p>
+                </div>
+
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg border-l-4 border-blue-400">
+                    <h4 class="text-xl font-semibold text-white mb-2">model.py</h4>
+                    <p class="text-gray-400">Core logic: detection, blur, tracking, export.</p>
+                </div>
+
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg border-l-4 border-blue-400">
+                    <h4 class="text-xl font-semibold text-white mb-2">utilities.py</h4>
+                    <p class="text-gray-400">Helper functions for YOLO and blur operations.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- CREDITS -->
+        <section id="credits" class="mb-20 animate-fade-in">
+            <h2 class="text-3xl md:text-4xl font-bold text-white mb-8 border-b-2 border-gray-700 pb-4">
+                <span class="gradient-text">Credits</span>
+            </h2>
+
+            <div class="max-w-2xl mx-auto bg-gray-800 border-2 border-gray-700 rounded-xl p-8 shadow-2xl credit-card">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-center">
+                    <div class="p-4 bg-gray-900 rounded-lg">
+                        <p style="font-family: Georgia, serif;" class="text-lg text-gray-200">BONGON, Janina Alexia</p>
+                    </div>
+                    <div class="p-4 bg-gray-900 rounded-lg">
+                        <p style="font-family: Georgia, serif;" class="text-lg text-gray-200">RAMOS, Irish Jane M.</p>
+                    </div>
+                    <div class="p-4 bg-gray-900 rounded-lg">
+                        <p style="font-family: Georgia, serif;" class="text-lg text-gray-200">TRINOS, Marvin Kyle D.</p>
+                    </div>
+                    <div class="p-4 bg-gray-900 rounded-lg">
+                        <p style="font-family: Georgia, serif;" class="text-lg text-gray-200">VITAN, Layne Ashley D.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- SHORTCUTS -->
+        <section id="shortcuts" class="mb-20 animate-fade-in">
+            <h2 class="text-3xl md:text-4xl font-bold text-white mb-8 border-b-2 border-gray-700 pb-4">
+                <span class="gradient-text">Shortcuts</span>
+            </h2>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg text-center">
+                    <div class="text-blue-400 text-2xl font-bold mb-2">Ctrl + O</div>
+                    <div class="text-gray-400">Open Video</div>
+                </div>
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg text-center">
+                    <div class="text-blue-400 text-2xl font-bold mb-2">Ctrl + E</div>
+                    <div class="text-gray-400">Export Video</div>
+                </div>
+                <div class="section-card bg-gray-800 p-6 rounded-lg shadow-lg text-center">
+                    <div class="text-blue-400 text-2xl font-bold mb-2">Spacebar</div>
+                    <div class="text-gray-400">Play / Pause</div>
+                </div>
             </div>
         </section>
 
     </main>
 
-    <!-- Scrollspy JavaScript -->
+    <!-- Scripts -->
     <script>
-        document.addEventListener('DOMContentLoaded', (event) => {
-            const sections = document.querySelectorAll('section');
-            const navLinks = document.querySelectorAll('.sidebar-link');
+        function toggleSidebar() {
+            const sidebar = document.querySelector('.sidebar');
+            const overlay = document.querySelector('.overlay');
+            sidebar.classList.toggle('open');
+            overlay.classList.toggle('active');
+        }
+
+        function closeSidebarMobile() {
+            if (window.innerWidth < 1024) {
+                toggleSidebar();
+            }
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            const sections = document.querySelectorAll("section");
+            const navLinks = document.querySelectorAll(".sidebar-link");
 
             function changeLinkState() {
                 let index = sections.length;
+                while (--index && window.scrollY + 120 < sections[index].offsetTop) { }
 
-                while (--index && window.scrollY + 100 < sections[index].offsetTop) { }
-
-                navLinks.forEach((link) => link.classList.remove('active'));
-
-                // Check if a link exists for the current index
-                if (navLinks[index]) {
-                    navLinks[index].classList.add('active');
-                }
+                navLinks.forEach(link => link.classList.remove("active"));
+                if (navLinks[index]) navLinks[index].classList.add("active");
             }
 
-            // Set the first link as active by default
-            if (navLinks.length > 0) {
-                navLinks[0].classList.add('active');
-            }
-
-            // Listen for scroll events
-            window.addEventListener('scroll', changeLinkState);
-            // Run on load
+            window.addEventListener("scroll", changeLinkState);
             changeLinkState();
+
+            // Animate sections on scroll
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        entry.target.style.opacity = '1';
+                        entry.target.style.transform = 'translateY(0)';
+                    }
+                });
+            }, { threshold: 0.1 });
+
+            sections.forEach(section => {
+                section.style.opacity = '0';
+                section.style.transform = 'translateY(30px)';
+                section.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+                observer.observe(section);
+            });
         });
     </script>
+
 </body>
 
-</html>
+</html>s

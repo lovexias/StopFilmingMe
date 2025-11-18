@@ -28,6 +28,11 @@ bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 # Debug and tracking globals
 DEBUG_TRACKING = True
 next_person_id = 1
+# --- ADD THIS FUNCTION ---
+def reset_global_trackers():
+    """Resets the global ID counter for fresh detection."""
+    global next_person_id
+    next_person_id = 1
 
 # ──────────────────────────────────────────────────────────────
 # ADVANCED PERSON TRACKING SYSTEM (From Kyle) - OPTIMIZED ok
@@ -608,12 +613,14 @@ def blur_faces_of_person(frame, bbox, blur_type='gaussian', strength=50):
             frame[fy:fy+fh, fx:fx+fw] = pixelated
 
         elif blur_type == 'solid':
-            # Solid fill with mean color; strength controls blending between original and solid
-            mean_color = cv2.mean(face_roi)[:3]  # BGR
-            fill = np.full_like(face_roi, tuple(map(int, mean_color)))
-            alpha = s / 100.0
-            blended = cv2.addWeighted(fill, alpha, face_roi, 1.0 - alpha, 0)
-            frame[fy:fy+fh, fx:fx+fw] = blended
+            # Convert strength to alpha (0 = light gray, 1 = black)
+            t = s / 100.0  
+            # Start at 180 (light gray) → 0 (black)
+            gray_level = int((1.0 - t) * 180)
+
+            solid_color = np.full_like(face_roi, (gray_level, gray_level, gray_level))
+
+            frame[fy:fy + fh, fx:fx + fw] = solid_color
 
         else:
             # Unknown type: fallback to a moderate gaussian
@@ -906,156 +913,3 @@ def match_orb_features(desc1, desc2, match_threshold=15):
     good_matches = [m for m in matches if m.distance < 60]
     return len(good_matches) >= match_threshold
 
-# --------- FILE 2 CONTENT (Original) ---------
-
-import cv2
-import subprocess
-import json
-import numpy as np
-import mediapipe as mp
-from ultralytics import YOLO
-from collections import deque
-import os
-
-# Initialize YOLOv8 segmentation model globally for pixel-level person detection
-yolo_model = YOLO('yolov8m-seg.pt')  # Use segmentation model for better person boundaries
-
-# ──────────────────────────────────────────────────────────────
-# ADDITION: Initialize MediaPipe solutions globally for reuse
-mp_face_global = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.7)
-mp_pose_global = mp.solutions.pose.Pose()
-
-# ──────────────────────────────────────────────────────────────
-# ADVANCED PERSON TRACKING SYSTEM WITH ORB FEATURES
-class PersonTracker:
-    def __init__(self, max_disappeared=15, feature_threshold=0.3, motion_threshold=150):
-        self.next_id = 0
-        self.tracked_people = {}  # id -> PersonTrackingData
-        self.max_disappeared = max_disappeared
-        self.feature_threshold = feature_threshold
-        self.motion_threshold = motion_threshold
-        
-        # Initialize feature extractors
-        self.orb = cv2.ORB_create(nfeatures=500)
-        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        
-    def extract_person_features(self, frame, bbox, mask=None):
-        """Extract ORB features from person region, using mask if available."""
-        x1, y1, x2, y2 = bbox
-        # Ensure bbox is within frame bounds
-        h, w = frame.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        if x2 <= x1 or y2 <= y1:
-            return None, None
-        person_crop = frame[y1:y2, x1:x2]
-        if person_crop.size == 0:
-            return None, None
-        gray = cv2.cvtColor(person_crop, cv2.COLOR_BGR2GRAY) if len(person_crop.shape) == 3 else person_crop
-        mask_crop = None
-        if mask is not None:
-            mask_crop = mask[y1:y2, x1:x2]
-            if mask_crop.dtype != np.uint8:
-                mask_crop = (mask_crop * 255).astype(np.uint8)
-        keypoints, descriptors = self.orb.detectAndCompute(gray, mask_crop)
-        if descriptors is None or len(keypoints) < 10:
-            return None, None
-        return keypoints, descriptors
-    
-    def calculate_feature_similarity(self, desc1, desc2):
-        if desc1 is None or desc2 is None:
-            return 0.0
-        try:
-            matches = self.matcher.match(desc1, desc2)
-            if len(matches) < 5:
-                return 0.0
-            matches = sorted(matches, key=lambda x: x.distance)
-            good_matches = matches[:min(20, len(matches))]
-            avg_distance = sum(m.distance for m in good_matches) / len(good_matches)
-            return max(0, 1.0 - (avg_distance / 100.0))
-        except:
-            return 0.0
-    
-    def calculate_motion_consistency(self, bbox1, bbox2):
-        c1 = ((bbox1[0] + bbox1[2]) / 2, (bbox1[1] + bbox1[3]) / 2)
-        c2 = ((bbox2[0] + bbox2[2]) / 2, (bbox2[1] + bbox2[3]) / 2)
-        displacement = np.sqrt((c2[0] - c1[0])**2 + (c2[1] - c1[1])**2)
-        return max(0, 1.0 - (displacement / self.motion_threshold))
-    
-    def update(self, frame, detections_with_masks, frame_number):
-        current_frame_people = {}
-        detection_features = []
-        for bbox, mask in detections_with_masks:
-            keypoints, descriptors = self.extract_person_features(frame, bbox, mask)
-            detection_features.append((bbox, mask, keypoints, descriptors))
-        matched_pairs = []
-        used_detections = set()
-        used_people = set()
-        for person_id, person_data in self.tracked_people.items():
-            if person_id in used_people:
-                continue
-            best_match_idx = None
-            best_score = 0
-            for idx, (det_bbox, det_mask, det_kp, det_desc) in enumerate(detection_features):
-                if idx in used_detections:
-                    continue
-                feature_score = self.calculate_feature_similarity(person_data.get('descriptors'), det_desc)
-                motion_score = self.calculate_motion_consistency(person_data.get('bbox'), det_bbox)
-                combined_score = (feature_score * 0.7) + (motion_score * 0.3)
-                if combined_score > self.feature_threshold and combined_score > best_score:
-                    best_score = combined_score
-                    best_match_idx = idx
-            if best_match_idx is not None:
-                matched_pairs.append((person_id, best_match_idx))
-                used_people.add(person_id)
-                used_detections.add(best_match_idx)
-        for person_id, det_idx in matched_pairs:
-            det_bbox, det_mask, det_kp, det_desc = detection_features[det_idx]
-            self.tracked_people[person_id].update({
-                'bbox': det_bbox,
-                'mask': det_mask,
-                'keypoints': det_kp,
-                'descriptors': det_desc,
-                'last_frame': frame_number,
-                'disappeared': 0,
-            })
-            current_frame_people[person_id] = self.tracked_people[person_id]
-        for idx, (det_bbox, det_mask, det_kp, det_desc) in enumerate(detection_features):
-            if idx not in used_detections:
-                self.tracked_people[self.next_id] = {
-                    'bbox': det_bbox,
-                    'mask': det_mask,
-                    'keypoints': det_kp,
-                    'descriptors': det_desc,
-                    'last_frame': frame_number,
-                    'disappeared': 0,
-                    'scanned': False,
-                    'gesture_detected': False,
-                    'first_seen_frame': frame_number
-                }
-                current_frame_people[self.next_id] = self.tracked_people[self.next_id]
-                self.next_id += 1
-        for person_id in self.tracked_people:
-            if person_id not in current_frame_people:
-                self.tracked_people[person_id]['disappeared'] += 1
-        to_remove = [pid for pid, data in self.tracked_people.items() if data['disappeared'] > self.max_disappeared]
-        for pid in to_remove:
-            del self.tracked_people[pid]
-        return current_frame_people
-    
-    def mark_person_scanned(self, person_id):
-        if person_id in self.tracked_people:
-            self.tracked_people[person_id]['scanned'] = True
-    
-    def mark_gesture_detected(self, person_id):
-        if person_id in self.tracked_people:
-            self.tracked_people[person_id]['gesture_detected'] = True
-    
-    def get_unscanned_people(self):
-        return {pid: data for pid, data in self.tracked_people.items() if not data.get('scanned', False) and data['disappeared'] == 0}
-    
-    def get_people_with_gestures(self):
-        return {pid: data for pid, data in self.tracked_people.items() if data.get('gesture_detected', False)}
-    
-    def get_person_ids_to_blur(self):
-        return {pid for pid, data in self.tracked_people.items() if data.get('gesture_detected', False)}

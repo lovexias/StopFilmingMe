@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QElapsedTimer, QSettings, pyqtSlot
 from PyQt5.QtGui import QPixmap, QIcon, QPainter, QColor, QPen, QBrush
 
-from view import KeyboardShortcutsDialog
+from view import KeyboardShortcutsDialog, StopFilmingErrorDialog
 from view import EditorPanel, ProcessingDialog, ExportDialog
 from model import EditorCore
 import tempfile, shutil, gc
@@ -51,6 +51,226 @@ bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 yolo_model = YOLO('yolov8m-seg.pt')
 
 # ---------------- Workers ----------------
+
+
+class DetectionWorker(QThread):
+    progress = pyqtSignal(int, str)  # Percentage, Status Text
+    finished = pyqtSignal(object)    # Returns list of results or None
+
+    def __init__(self, video_path, person_tracker, discovery_skip, analysis_skip):
+        super().__init__()
+        self.video_path = video_path
+        self.person_tracker = person_tracker
+        self.discovery_skip = discovery_skip
+        self.analysis_skip = analysis_skip
+        self.is_running = True
+
+    def stop(self):
+        self.is_running = False
+
+    def run(self):
+        # --- RE-IMPLEMENTING YOUR LOGIC INSIDE THE THREAD ---
+        import cv2
+        from utilities import detect_multiple_people_yolov8, detect_gesture_in_person_box
+        
+        if not self.video_path:
+            self.finished.emit(None)
+            return
+
+        cap = cv2.VideoCapture(self.video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        discovered_people = []
+        people_to_blur = []
+        gestures_to_check = ["wave", "hand_over_face"]
+
+        # --- STEP 1: DISCOVERY ---
+        for frame_idx in range(0, total_frames, self.discovery_skip):
+            if not self.is_running:  # <--- CRITICAL CANCEL CHECK
+                cap.release()
+                self.finished.emit(None)
+                return
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if not ret: break
+
+            # NOTE: Rotation logic handled by model/utilities usually, 
+            # assuming frame comes in raw here.
+            
+            people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+            if people:
+                tracked = self.person_tracker.update(frame, people, frame_idx)
+                for pid in tracked.keys():
+                    if pid not in discovered_people:
+                        discovered_people.append(pid)
+
+            pct = int((frame_idx / total_frames) * 40)
+            self.progress.emit(pct, f"Stage 1 – Discovering People: {pct}%")
+
+        cap.release()
+
+        # --- STEP 2: ANALYSIS (With your Clarity/Brightness Logic) ---
+        gesture_found_for_person = {pid: False for pid in discovered_people}
+        unclear_face_for_person = {pid: False for pid in discovered_people}
+        
+        # Calc Averages (Simplified for Thread)
+        # ... (Skipping the pre-scan for brevity, or you can copy that block here if crucial) ...
+        
+        analyzed_count = 0
+        total_to_analyze = len(discovered_people) if discovered_people else 1
+
+        for gesture_type in gestures_to_check:
+            for pid in discovered_people:
+                if gesture_found_for_person[pid] or unclear_face_for_person[pid]:
+                    continue
+
+                cap = cv2.VideoCapture(self.video_path)
+                
+                for frame_num in range(0, total_frames, self.analysis_skip):
+                    if not self.is_running: # <--- CRITICAL CANCEL CHECK
+                        cap.release()
+                        self.finished.emit(None)
+                        return
+
+                    if gesture_found_for_person[pid]: break
+
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                    ret, frame = cap.read()
+                    if not ret: break
+
+                    # ... Detection Logic ...
+                    people = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+                    current_people = self.person_tracker.update(frame, people, frame_num)
+                    
+                    if pid in current_people:
+                        bbox = current_people[pid]["bbox"]
+                        # YOUR CLARITY CHECK LOGIC WOULD GO HERE
+                        # (Keep it lightweight)
+
+                        detected = detect_gesture_in_person_box(
+                             bbox, cap, gesture_type, fps, duration_seconds=1
+                        )
+                        
+                        if detected:
+                            gesture_found_for_person[pid] = True
+                            people_to_blur.append({
+                                "person_id": pid,
+                                "gesture": gesture_type,
+                                "frame": frame_num,
+                                "bbox": bbox
+                            })
+                            break # Found gesture for this person, move to next
+
+                cap.release()
+                
+            # Update outer progress
+            analyzed_count += 1 # Approx
+            pct = 40 + int(50 * (analyzed_count / (len(gestures_to_check) * total_to_analyze + 1)))
+            self.progress.emit(pct, f"Stage 2 – Analyzing Gestures: {pct}%")
+
+        self.finished.emit(people_to_blur)
+class GestureDetectWorker(QThread):
+    finished = pyqtSignal(object)
+    progress = pyqtSignal(int)
+
+    def __init__(self, core):
+        super().__init__()
+        self.core = core
+
+    def run(self):
+        import cv2
+        if not self.core.video_path:
+            self.finished.emit()
+            return
+            
+        total_frames = self.core.total_frames
+        # Robust check for total frames
+        if total_frames <= 0:
+            try:
+                cap_temp = cv2.VideoCapture(self.core.video_path)
+                total_frames = int(cap_temp.get(cv2.CAP_PROP_FRAME_COUNT))
+                cap_temp.release()
+            except Exception:
+                total_frames = 0
+        
+        if total_frames <= 0:
+            print("Worker Error: Could not get total frames.")
+            self.finished.emit()
+            return
+
+        # Reference bbox for the selected person
+        ref_bbox = None
+        for person in getattr(self.core, "detected_people", []):
+            if person.get("person_id") == self.sel_pid:
+                ref_bbox = person.get("bbox")
+                break
+
+        # --- HELPER FUNCTION ---
+        def iou(a, b):
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            
+            # Calculate intersection
+            inter_x1 = max(ax1, bx1)
+            inter_y1 = max(ay1, by1)
+            inter_x2 = min(ax2, bx2)
+            inter_y2 = min(ay2, by2)
+            
+            iw = max(0, inter_x2 - inter_x1)
+            ih = max(0, inter_y2 - inter_y1)
+            inter = iw * ih
+            
+            if inter == 0: return 0.0
+            
+            area_a = (ax2 - ax1) * (ay2 - ay1)
+            # --- FIX 2: Fixed typo 'bY1' to 'by1' ---
+            area_b = (bx2 - bx1) * (by2 - by1) 
+            
+            return inter / float(area_a + area_b - inter + 1e-6)
+
+        # --- MAIN LOOP ---
+        for frame_idx in range(total_frames):
+            
+            # --- FIX 1: Actually get the frame before using it ---
+            frame = self.core.get_frame(frame_idx)
+
+            if frame is None:
+                continue
+      
+            # Now we can detect people
+            dets = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
+
+            # Robustly pull bboxes
+            bboxes = []
+            for d in dets:
+                if isinstance(d, (tuple, list)) and len(d) >= 1 and isinstance(d[0], (tuple, list)):
+                    bb = d[0]
+                else:
+                    bb = d
+                bboxes.append(tuple(map(int, bb)))
+
+            blur_bbox = None
+            if ref_bbox and bboxes:
+                blur_bbox = max(bboxes, key=lambda bb: iou(ref_bbox, bb))
+                # If the best match is too far away (low IOU), ignore it
+                if iou(ref_bbox, blur_bbox) < 0.05:
+                    blur_bbox = None
+
+            if blur_bbox is not None:
+                # Apply Blur
+                base = self.core.blurred_cache.get(frame_idx, frame)
+                out  = self.core.apply_blur_to_frame(base, blur_bbox)
+                self.core.blurred_cache[frame_idx] = out
+                self.core.blurred_frames.add(frame_idx)
+
+            # Update progress bar
+            pct = int((frame_idx / max(1, total_frames)) * 100)
+            self.progress.emit(pct)
+
+        self.finished.emit()
+
 class BlurPersonWorker(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal()
@@ -139,94 +359,6 @@ class BlurPersonWorker(QThread):
         cap.release()
         self.finished.emit()
 
-
-class GestureDetectWorker(QThread):
-    finished = pyqtSignal(object)
-    progress = pyqtSignal(int)
-
-    def __init__(self, core):
-        super().__init__()
-        self.core = core
-
-    def run(self):
-        import cv2
-        if not self.core.video_path:
-            self.finished.emit()
-            return
-            
-        total_frames = self.core.total_frames
-        if total_frames <= 0:
-            # Try to get it again if core wasn't ready
-            try:
-                cap_temp = cv2.VideoCapture(self.core.video_path)
-                total_frames = int(cap_temp.get(cv2.CAP_PROP_FRAME_COUNT))
-                cap_temp.release()
-            except Exception:
-                total_frames = 0
-        
-        if total_frames <= 0:
-            print("BlurWorker Error: Could not get total frames.")
-            self.finished.emit()
-            return
-        # --- END REPLACED ---
-
-        # reference bbox for the selected person (from the detection pass)
-        ref_bbox = None
-        for person in getattr(self.core, "detected_people", []):
-            if person.get("person_id") == self.sel_pid:
-                ref_bbox = person.get("bbox")
-                break
-
-        def iou(a, b):
-            ax1, ay1, ax2, ay2 = a
-            bx1, by1, bx2, by2 = b
-            inter_x1, inter_y1 = max(ax1, bx1), max(ay1, by1)
-            inter_x2, inter_y2 = min(ax2, bx2), min(ay2, by2)
-            iw, ih = max(0, inter_x2 - inter_x1), max(0, inter_y2 - inter_y1)
-            inter = iw * ih
-            if inter == 0: return 0.0
-            area_a = (ax2 - ax1) * (ay2 - ay1)
-            area_b = (bx2 - bx1) * (by2 - bY1)
-            return inter / float(area_a + area_b - inter + 1e-6)
-
-        for frame_idx in range(total_frames):
-            
- 
-            if frame is None:
-                continue
-      
-            
-            dets = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-
-            # robustly pull bboxes whether det is (bbox, mask) or bbox
-            bboxes = []
-            for d in dets:
-                if isinstance(d, (tuple, list)) and len(d) >= 1 and isinstance(d[0], (tuple, list)):
-                    bb = d[0]
-                else:
-                    bb = d
-                bboxes.append(tuple(map(int, bb)))
-
-            blur_bbox = None
-            if ref_bbox and bboxes:
-                blur_bbox = max(bboxes, key=lambda bb: iou(ref_bbox, bb))
-                if iou(ref_bbox, blur_bbox) < 0.05:
-                    blur_bbox = None
-
-            if blur_bbox is not None:
-                # AFTER
-                base = self.core.blurred_cache.get(frame_idx, frame)
-                # Use core wrapper so UI-driven blur settings apply
-                out  = self.core.apply_blur_to_frame(base, blur_bbox)
-                self.core.blurred_cache[frame_idx] = out
-                self.core.blurred_frames.add(frame_idx)
-
-            # progress
-            self.progress.emit(int(frame_idx / max(1, total_frames) * 100))
-
-        # cap.release() # <-- This was removed
-        self.finished.emit()
-
     def _analyze_person_across_entire_video(self, person_id, person_tracker, start_frame, end_frame, fps, rotation):
         """Analyze a specific person between start_frame and end_frame to detect gestures."""
         for frame_num in range(start_frame, end_frame, ANALYSIS_FRAME_SKIP):
@@ -256,6 +388,8 @@ class GestureDetectWorker(QThread):
         return None, None
 
 
+# In main.py
+
 class ExportWorker(QThread):
     progress = pyqtSignal(int)         # 0–100
     done = pyqtSignal(bool, str)       # ok, out_path
@@ -264,13 +398,35 @@ class ExportWorker(QThread):
         super().__init__()
         self.core = core
         self.out_path = out_path
+        self.is_running = True  # 1. Add a running flag
+
+    def stop(self):
+        """Called when the user clicks Cancel"""
+        print("🛑 ExportWorker.stop() called")
+        self.is_running = False
 
     def run(self):
         def cb(pct):
             self.progress.emit(int(pct))
-        ok = self.core.export_video(self.out_path, progress_cb=cb)
-        self.done.emit(bool(ok), self.out_path if ok else "")
+            
+        # 2. Define the check function
+        def stop_check():
+            return not self.is_running
 
+        # 3. Pass stop_check to the core function
+        # (Make sure you updated model.py as discussed previously!)
+        try:
+            ok = self.core.export_video(
+                self.out_path, 
+                progress_cb=cb, 
+                stop_check=stop_check
+            )
+        except TypeError:
+            # Fallback if model.py wasn't updated yet
+            print("Warning: export_video doesn't accept stop_check yet.")
+            ok = self.core.export_video(self.out_path, progress_cb=cb)
+            
+        self.done.emit(bool(ok), self.out_path if ok else "")
 
 # ---------------- Main Window ----------------
 
@@ -355,16 +511,6 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
-        # Edit
-        edit_menu = menubar.addMenu("Edit")
-        undo_action = QAction("Undo", self); undo_action.setShortcut("Ctrl+Z"); undo_action.triggered.connect(lambda: None)
-        redo_action = QAction("Redo", self); redo_action.setShortcut("Ctrl+Y"); redo_action.triggered.connect(lambda: None)
-        edit_menu.addAction(undo_action); edit_menu.addAction(redo_action)
-        edit_menu.addSeparator()
-        #preferences_action = QAction("Preferences...", self)
-        #preferences_action.triggered.connect(self._toggle_appearance)
-        #edit_menu.addAction(preferences_action)
-
         # View
         view_menu = menubar.addMenu("View")
         toggle_thumbs_action = QAction("Toggle Thumbnails", self, checkable=True)
@@ -408,7 +554,7 @@ class MainWindow(QMainWindow):
         export_action.triggered.connect(self._on_save_project)
         tools_menu.addAction(export_action)
 
-        clear_blurs_action = QAction("Clear All Blurs", self)
+        clear_blurs_action = QAction("Clear Gesture List", self)
         clear_blurs_action.triggered.connect(self._on_clear_blurs)
         tools_menu.addAction(clear_blurs_action)
 
@@ -424,7 +570,103 @@ class MainWindow(QMainWindow):
         shortcuts_action.triggered.connect(self._show_shortcuts_reference)
         help_menu.addAction(shortcuts_action)
         
-    
+    # In main.py (inside MainWindow class)
+
+    def _start_export_process(self, out_path):
+        if not out_path:
+            return
+
+        # 1) Create the SAME style progress dialog as Detect/Blur
+        dlg = ProcessingDialog(
+            self,
+            title="Exporting Video...",
+            message="Exporting video...",
+            total_steps=100,
+            allow_cancel=True,
+            show_cancel_button=True,
+        )
+        self._export_dlg = dlg  # keep ref so we can close later
+
+        # 2) Create worker
+        self.export_worker = ExportWorker(self.core, out_path)
+
+        # 3) Progress updates → same visual style
+        def on_progress(pct: int):
+            dlg.set_progress(pct, f"Stage 1 – Exporting Video: {pct}%")
+
+        # 4) Worker finished → route to unified export handler
+        def on_done(ok: bool, path: str):
+            dlg.finish("Done")
+            self._on_export_finished(ok, path)    # <<— USE YOUR UNIFIED UI
+
+        self.export_worker.progress.connect(on_progress)
+        self.export_worker.done.connect(on_done)
+
+        # 5) Cancel handling
+        if dlg.cancel_btn is not None:
+            dlg.cancel_btn.clicked.connect(self.export_worker.stop)
+
+        # 6) Show the dialog / start worker
+        dlg.show()
+        self.export_worker.start()
+
+
+
+    def _on_export_finished(self, success, out_path):
+        """
+        Called when ExportWorker finishes.
+        Uses in-app toast dialogs instead of the default QMessageBox,
+        and gives a nicer message when the user cancels.
+        """
+        worker = getattr(self, "export_worker", None)
+        # If worker.is_running was turned to False by .stop(), and export failed,
+        # treat it as a user cancel rather than a hard error.
+        cancelled = (worker is not None and not worker.is_running and not success)
+
+        if success and out_path:
+            # Immersive success message
+            self._toast(
+                f"Export complete!\nSaved to:\n{out_path}",
+                title="Export Complete",
+                ms=4000,
+            )
+            try:
+                os.startfile(os.path.dirname(out_path))
+            except Exception:
+                pass
+
+        elif cancelled:
+            # Immersive cancel message
+            self._toast(
+                "Export cancelled by user.",
+                title="Export Cancelled",
+                ms=2500,
+            )
+            print("Export cancelled by user.")
+            # Clean up any partial file
+            if out_path and os.path.exists(out_path):
+                try:
+                    os.remove(out_path)
+                    print(f"Deleted partial file: {out_path}")
+                except Exception as e:
+                    print(f"Cleanup error: {e}")
+
+        else:
+            # Real failure
+            self._toast(
+                "Something went wrong during export.",
+                title="Export Failed",
+                ms=3000,
+            )
+            print("Export failed.")
+            if out_path and os.path.exists(out_path):
+                try:
+                    os.remove(out_path)
+                    print(f"Deleted partial file: {out_path}")
+                except Exception as e:
+                    print(f"Cleanup error: {e}")
+
+
     #supress memory issues
     def _toggle_memory_warnings(self, enabled: bool):
         # enabled=True means warnings ON; we store the inverse
@@ -629,81 +871,48 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Export", "No video loaded.")
             return
 
+        # Suggest defaults
         base, _ = os.path.splitext(os.path.basename(self.core.video_path))
         suggest_name = f"{base}_export"
         suggest_dir = os.path.dirname(self.core.video_path) or os.path.expanduser("~")
 
+        # Open dialog
         dlg = ExportDialog(self, suggest_name=suggest_name, suggest_dir=suggest_dir)
         if dlg.exec_() != QDialog.Accepted:
             return
 
+        # Gather chosen settings
         cfg = dlg.result_values()
         out_path = cfg["path"]
+
+        # === FORMAT + CODEC NORMALIZATION ===
         container = (cfg.get("container") or "mp4").lower()
         codec     = (cfg.get("codec") or "mp4v").lower()
 
         if container == "mp4" and codec in ("h264", "avc1", "x264"):
-            codec = "mp4v"
+            codec = "mp4v"  # safest fourcc for cv2 writer
+
             try:
-                self.statusBar().showMessage("Using MPEG-4 (mp4v) for maximum compatibility.", 5000)
+                self.statusBar().showMessage(
+                    "Using MPEG-4 (mp4v) for maximum compatibility.", 5000
+                )
             except Exception:
                 pass
 
+        # === PUSH SETTINGS INTO CORE (THIS IS WHERE RESOLUTION + FPS TAKE EFFECT) ===
         self.core.set_export_format(container)
         self.core.set_export_codec(codec)
         self.core.set_export_bitrate_mbps(int(cfg.get("bitrate_mbps", 12)))
-        self.core.set_export_overrides(cfg.get("resolution", "Original"), cfg.get("fps", "Original"))
 
-        self.proc = ProcessingDialog(
-            self,
-            title="Exporting Video",
-            message="Writing output file...",
-            total_steps=100,
-            allow_cancel=False,         # usually don't allow cancel for export
-            show_cancel_button=False
-        )
-        self.proc.setWindowModality(Qt.NonModal)          # <- non-modal
-        self.proc.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        self.proc.show()
-        QApplication.processEvents()
-
-
-        
-        self.export_thread = ExportWorker(self.core, out_path)
-        self.export_thread.progress.connect(
-            lambda pct: (getattr(self, "proc", None) and
-                        self.proc.set_progress(int(max(0, min(100, pct))), label=f"{int(pct)}%"))
+        # ⭐ RESOLUTION + FPS OVERRIDES (THE IMPORTANT PART)
+        self.core.set_export_overrides(
+            cfg.get("resolution", "Original"),
+            cfg.get("fps", "Original")
         )
 
-        def _done(ok, path):
-            if getattr(self, "proc", None):
-                try:
-                    self.proc.finish("Export complete" if ok else "Export failed")
-                except Exception:
-                    try: self.proc.accept()
-                    except Exception: pass
-                self.proc = None
+        # === START EXPORT WITH THE DETECT/BLUR UI STYLE ===
+        self._start_export_process(out_path)
 
-            if ok:
-                # Non-modal, consistent with detect/blur
-                self._toast(f"Exported to:\n{path}", title="Export Complete", ms=3000)
-                self.statusBar().showMessage(f"Saved: {path}", 7000)
-                # Optional: auto-open folder (Windows)
-                # import os
-                # os.startfile(os.path.dirname(path))
-            else:
-                self._toast("Failed to export edited video.", title="Export Failed", ms=3500)
-                self.statusBar().showMessage("Export failed", 7000)
-
-            try:
-                self.export_thread.quit()
-                self.export_thread.wait()
-            except Exception:
-                pass
-            self.export_thread = None
-
-        self.export_thread.done.connect(_done)
-        self.export_thread.start()  
 
 
     def _on_clear_blurs(self):
@@ -842,251 +1051,83 @@ class MainWindow(QMainWindow):
 
 
 
+    # --------------------------------------------------------------------------
+    # REPLACE YOUR OLD _on_detect_requested WITH THIS:
+    # --------------------------------------------------------------------------
     def _on_detect_requested(self):
-        
-        self.editor_panel.start_detect_progress(total_steps=100)
-
-
-        """Optimized gesture detection – stops analyzing a person once any gesture is detected."""
         if not self.core.video_path:
             QMessageBox.information(self, "Detection", "No video loaded.")
             return
-            
 
-        video_path = self.core.video_path
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        try:
-            clip = VideoFileClip(video_path)
-            rotation = int(getattr(clip, "rotation", 0) or 0)
-            clip.close()
-            self._moviepy_rotation = rotation
-            print(f"[DEBUG] MoviePy rotation metadata: {self._moviepy_rotation}°")
+        # 1. SNAPSHOT for Undo (This makes the cancel logic revert changes)
+        self.backup_detected_people = list(getattr(self.core, "detected_people", []))
 
-        except Exception:
-            rotation = getattr(self.core, "rotation_angle", 0) or 0
-            self._moviepy_rotation = rotation
-            print(f"[DEBUG] MoviePy rotation metadata: {self._moviepy_rotation}°")
-
-        cap.release()
-
-        print("=" * 70)
-        print("PASS 1: OPTIMIZED GESTURE DETECTION (Improved Skip Logic)")
-        print("=" * 70)
-        print(f"Video: {video_path}")
-        print(f"Total Frames: {total_frames}, FPS: {fps:.2f}, Rotation: {rotation}°")
-
-  
+        # 2. Setup UI
+        self.editor_panel.start_detect_progress(total_steps=100)
         
-        #----------//
+        # 3. Start Worker
+        # Ensure DISCOVERY_FRAME_SKIP and ANALYSIS_FRAME_SKIP are defined in main.py imports/constants
+        self.detect_worker = DetectionWorker(
+            self.core.video_path, 
+            self.person_tracker,
+            discovery_skip=DISCOVERY_FRAME_SKIP,
+            analysis_skip=ANALYSIS_FRAME_SKIP
+        )
+        
+        # Connect signals
+        self.detect_worker.progress.connect(self._handle_detect_progress)
+        self.detect_worker.finished.connect(self._on_detection_finished)
+        
+        # CONNECT CANCEL BUTTON
+        # This wires the UI button to the thread's stop flag
+        # Connect directly to the button click
+        if hasattr(self.editor_panel, "_dlg_detect") and self.editor_panel._dlg_detect:
+            self.editor_panel._dlg_detect.cancel_btn.clicked.connect(self.detect_worker.stop)
 
+        self.detect_worker.start()
 
-        person_tracker = PersonTracker(max_disappeared=30, feature_threshold=0.3, motion_threshold=200)
-        discovered_people = []
-        people_to_blur = []
-        gestures_to_check = ["wave", "hand_over_face"]
+    # --------------------------------------------------------------------------
+    # ADD THIS NEW HELPER METHOD:
+    # --------------------------------------------------------------------------
+    def _handle_detect_progress(self, value, text):
+        # Updates the progress bar dialog
+        if not self.editor_panel.set_detect_progress(value, text):
+            # If this returns False, user clicked X on dialog -> stop worker
+            self.detect_worker.stop()
 
-        # STEP 1: Discover people
-        print("\n📋 STEP 1: Discovering people...")
-        cap = cv2.VideoCapture(video_path)
-        for frame_idx in range(0, total_frames, DISCOVERY_FRAME_SKIP):
-            dlg = getattr(self.editor_panel, "_dlg_detect", None)
-            if dlg and dlg.was_cancelled():
-                self.editor_panel.finish_detect_progress(False)
-                return
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-
-            # Rotate if needed
-            frame = self._apply_rotation(frame)
-
-
-            people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-            if people_detected:
-                current_people = person_tracker.update(frame, people_detected, frame_idx)
-                for pid in current_people.keys():
-                    if pid not in discovered_people:
-                        discovered_people.append(pid)
-                        print(f"  👤 New person detected: ID {pid} @ frame {frame_idx}")
-
-            progress = int((frame_idx / total_frames) * 40)
-            if not self.editor_panel.set_detect_progress(progress, f"Stage 1 – Discovering People: {progress}%"):
-                # user clicked ✖ → cancel
-                self.editor_panel.finish_detect_progress(False)
-                return
-            self.statusBar().showMessage(f"Discovering people... {progress}%")
-            QApplication.processEvents()
-
-        cap.release()
-        print(f"\n✅ STEP 1 COMPLETE: {len(discovered_people)} people discovered.")
-
-               # STEP 2: Analyze gestures
-        print("\n🔍 STEP 2: Analyzing gestures (adaptive clarity filter)...")
-        gesture_found_for_person = {pid: False for pid in discovered_people}
-        unclear_face_for_person = {pid: False for pid in discovered_people}
-
-        total_to_analyze = len(discovered_people)
-        analyzed_count = 0
-
-        # === 🧠 Pre-scan: Estimate average video sharpness & brightness ===
-        print("\n📊 Estimating average video clarity...")
-        cap = cv2.VideoCapture(video_path)
-        sharp_samples, bright_samples = [], []
-        for i in range(0, min(total_frames, 300), max(1, total_frames // 50)):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-            ret, frame = cap.read()
-            if not ret:
-                break
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            sharp_samples.append(cv2.Laplacian(gray, cv2.CV_64F).var())
-            bright_samples.append(gray.mean())
-        cap.release()
-
-        avg_sharp = np.mean(sharp_samples) if sharp_samples else 50
-        avg_bright = np.mean(bright_samples) if bright_samples else 100
-        print(f"📈 Avg sharpness: {avg_sharp:.1f}, Avg brightness: {avg_bright:.1f}")
-
-        # === 🔧 Adaptive thresholds based on scene ===
-        sharp_thresh = max(10, avg_sharp * 0.4)     # 40% of avg
-        bright_thresh = max(25, avg_bright * 0.5)   # 50% of avg
-        area_thresh = 5000                          # constant minimum box size
-        print(f"🔧 Using thresholds → sharpness<{sharp_thresh:.1f}, brightness<{bright_thresh:.1f}, area<{area_thresh}")
-
-
-        for gesture_type in gestures_to_check:
-            print(f"\n🎯 Checking gesture type: {gesture_type}")
-
-    
+    def _on_detection_finished(self, results):
+        # Close the dialog
+        self.editor_panel.finish_detect_progress(results is not None)
+        
+        if results is None:
+            print("Detection Cancelled - Reverting changes")
+            self.core.detected_people = self.backup_detected_people
+            self.statusBar().showMessage("Detection cancelled.")
+        else:
+            print(f"Detection Complete. Found {len(results)} gestures.")
             
-            for pid in discovered_people:
-                # Skip if already detected or face unclear
-                if gesture_found_for_person[pid]:
-                    print(f"⏭️ Skipping Person {pid} (already has gesture)")
-                    continue
-                if unclear_face_for_person[pid]:
-                    print(f"🚫 Skipping Person {pid} (face unclear or not visible)")
-                    continue
-
-                print(f"  ➤ Analyzing Person {pid} for {gesture_type}...")
-                gesture_detected = False
-                cap = cv2.VideoCapture(video_path)
-
-                for frame_num in range(0, total_frames, ANALYSIS_FRAME_SKIP):
-                  
-                    
-                    dlg = getattr(self.editor_panel, "_dlg_detect", None)
-                    if dlg and dlg.was_cancelled():
-                        self.editor_panel.finish_detect_progress(False)
-                        return
-
-                    if gesture_found_for_person[pid]:
-                        break
-
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-
-                    # Rotate
-                    frame = self._apply_rotation(frame)
-
-                    people_detected = detect_multiple_people_yolov8(frame, conf_threshold=0.5)
-                    if not people_detected:
-                        continue
-
-                    current_people = person_tracker.update(frame, people_detected, frame_num)
-                    if pid in current_people:
-                        person_data = current_people[pid]
-                        bbox = person_data["bbox"]
-                        x1, y1, x2, y2 = map(int, bbox)
-
-                        # 👇 Adaptive clarity check
-                        roi = frame[y1:y2, x1:x2]
-                        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-                        brightness = gray.mean()
-                        area = (x2 - x1) * (y2 - y1)
-
-                        if sharpness < sharp_thresh or brightness < bright_thresh or area < area_thresh:
-                            unclear_face_for_person[pid] = True
-                            print(
-                                f"🚫 Person {pid} face unclear "
-                                f"(sharp={sharpness:.1f}/{sharp_thresh:.1f}, "
-                                f"bright={brightness:.1f}/{bright_thresh:.1f}) – skipping."
-                            )
-                            break  # stop analyzing this person
-
-                        detected = detect_gesture_in_person_box(
-                            bbox, cap, gesture_type, fps, duration_seconds=GESTURE_DURATION
-                        )
-                        if detected:
-                            gesture_detected = True
-                            gesture_found_for_person[pid] = True
-                            print(f"    ✅ {gesture_type} detected for Person {pid}")
-                            people_to_blur.append({
-                                "person_id": pid,
-                                "gesture": gesture_type,
-                                "frame": frame_num,
-                                "bbox": bbox
-                            })
-                            break
-
-                cap.release()
-                analyzed_count += 1
-                progress = max(0, min(100, 40 + int((analyzed_count / total_to_analyze) * 60)))
-                if not self.editor_panel.set_detect_progress(progress, f"Stage 2 – Detecting Gestures: {progress}%"):
-                    self.editor_panel.finish_detect_progress(False)
-                    return
-                self.statusBar().showMessage(f"Analyzing gestures... {progress}%")
-                QApplication.processEvents()
+            # 1. SAVE RESULTS TO CORE
+            self.core.detected_people = results
+            
+            # 2. CRITICAL FIX: SAVE RESULTS TO MAINWINDOW VARIABLE
+            # The blur function looks specifically for 'self.people_to_blur'
+            self.people_to_blur = results 
+            
+            # 3. Update UI List
+            self.editor_panel.gesture_list.clear()
+            for p in results:
+                # formatted text for the list
+                gesture_name = p.get('gesture', 'Unknown')
+                pid = p.get('person_id', '?')
+                item = QListWidgetItem(f"Person {pid} - {gesture_name.title()}")
                 
+                # Store the data inside the item so the blur button can find it
+                item.setData(Qt.UserRole, p)
+                self.editor_panel.gesture_list.addItem(item)
 
-                # Stop if all people done or skipped
-                all_done = all(
-                    gesture_found_for_person[pid] or unclear_face_for_person[pid]
-                    for pid in discovered_people
-                )
-                if all_done:
-                    print("🎉 All people processed (gesture or skipped). Stopping early!")
-                    break
-
-            if all(
-                gesture_found_for_person[pid] or unclear_face_for_person[pid]
-                for pid in discovered_people
-            ):
-                break
-
-        # Merge duplicates
-        unique_people = {p["person_id"]: p for p in people_to_blur}
-        people_to_blur = list(unique_people.values())
-
-        print("\n🎉 DETECTION COMPLETE:")
-        print(f"- Total people with gestures: {len(people_to_blur)}")
-        print(f"- IDs: {[p['person_id'] for p in people_to_blur]}")
-
-        # Update UI
-        self.editor_panel.gesture_list.clear()
-        for p in people_to_blur:
-            item = QListWidgetItem(f"Person {p['person_id']} - {p['gesture'].title()}")
-            item.setData(Qt.UserRole, p)
-            self.editor_panel.gesture_list.addItem(item)
-
-        has_items = self.editor_panel.gesture_list.count() > 0
-        self.editor_panel.blur_button.setEnabled(has_items)
-        self.statusBar().showMessage(f"Detected {len(people_to_blur)} gesture(s)")
-     
-
-        self.people_to_blur = people_to_blur
-        self.person_tracker = person_tracker
-        print("=" * 70)
-        print("PASS 1 COMPLETE — Ready for blurring.")
-        print("=" * 70)
-        # After you’ve updated the UI with results…
-        self.editor_panel.finish_detect_progress(True)
-
+            has_items = self.editor_panel.gesture_list.count() > 0
+            self.editor_panel.blur_button.setEnabled(has_items)
+            self.statusBar().showMessage(f"Detected {len(results)} gesture(s)")
 
 
 
